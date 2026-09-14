@@ -11,7 +11,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/voocel/ainovel-cli/internal/host"
+	"github.com/voocel/ainovel-cli/internal/library"
 	"github.com/voocel/ainovel-cli/internal/utils"
+	buildversion "github.com/voocel/ainovel-cli/internal/version"
 )
 
 const maxEvents = 500
@@ -51,13 +53,20 @@ var toolSpinnerFrames = []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯"
 
 // Model 是 TUI 的顶层状态。
 type Model struct {
-	runtime            *host.Host
-	cocreate           *cocreateState
-	help               *helpState
-	modelSwitch        *modelSwitchState
-	modelConfig        *modelConfigState
-	report             *reportState
-	version            string
+	runtime     *host.Host
+	cocreate    *cocreateState
+	help        *helpState
+	modelSwitch *modelSwitchState
+	modelConfig *modelConfigState
+	report      *reportState
+	library     *libraryState  // /books /chapters /read 只读面板
+	recentBooks []library.Book // 欢迎页"最近的书"，入口层启动时从书架登记读一次
+	streamShare int            // 实时输出占中栏高度百分比；0 = 默认 60，Ctrl+↑↓ 调整
+	version     string
+	build       buildversion.Info // 切书时重开 Host 要把版本信息写进新书的日志
+	// registryDir 是书架登记目录，空 = 全局 ~/.ainovel。存在的唯一理由是测试：
+	// 换书/新建书会往 books.json 写一笔，测试绝不能写进用户真实的书架。
+	registryDir        string
 	importer           *importState
 	importSeq          int
 	simulator          *simulationState
@@ -161,16 +170,25 @@ func NewModel(rt *host.Host, version string) Model {
 	}
 }
 
-func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{
-		textarea.Blink,
+// sessionCmds 是绑在当前 Host 上的常驻订阅与恢复流程。进程启动和运行中切书都要
+// 完整跑一遍——切书后的新 Host 需要自己的事件流、快照 tick 和恢复门禁。
+//
+// 这里只放**绑 Host** 的命令。与书无关的 UI 定时器（spinner）绝不能进来：它们靠
+// 处理器自我续期，旧的那个在切书后仍然活着并投递给新 Model，再续一个就会每切一次
+// 书多一条 350ms 定时器，每条都触发全屏重绘。UI 定时器只在 Init 里起一次。
+func (m Model) sessionCmds() []tea.Cmd {
+	return []tea.Cmd{
 		listenEvents(m.runtime),
 		listenDone(m.runtime),
 		listenStream(m.runtime),
 		tickSnapshot(m.runtime),
 		bootstrapRuntime(m.runtime),
-		tickSpinner(),
 	}
+}
+
+func (m Model) Init() tea.Cmd {
+	// tickSpinner 在进程生命周期里只起这一次：它自我续期，切书时由新 Model 接手。
+	cmds := append([]tea.Cmd{textarea.Blink, tickSpinner()}, m.sessionCmds()...)
 	// 启动版本检查：后台一次；错误仅写日志，命中新版本才浮出提醒。
 	if !m.disableUpdateCheck {
 		cmds = append(cmds, checkForUpdate(m.version))
@@ -247,17 +265,6 @@ func (m *Model) flushStreamIfDirty() bool {
 func (m *Model) refreshEventViewport() {
 	centerW := m.eventFlowWidth()
 	content := renderEventContent(m.events, centerW, m.toolSpinnerIdx)
-	snap := m.snapshot
-	if m.starting {
-		snap.IsRunning = true
-	}
-	if activity := renderEventActivity(snap, m.spinnerIdx, centerW); activity != "" {
-		if strings.TrimSpace(content) != "" {
-			content += "\n" + activity
-		} else {
-			content = activity
-		}
-	}
 	m.viewport.SetContent(content)
 	if m.autoScroll {
 		m.viewport.GotoBottom()
@@ -304,16 +311,39 @@ func (m *Model) updateViewportSize() {
 	m.detailVP.Height = bodyH
 	leftW := m.sidebarWidth()
 	m.stateVP.Width = max(1, leftW-2)
-	m.stateVP.Height = max(1, bodyH-1) // -1 为顶部留白，底行直接显示内容
+	m.stateVP.Height = max(1, bodyH) // 侧栏无上下留白，整高都给内容
 	// 高度或内容变短后，自由滚动的左右两栏可能停在越界偏移上（bubbles 的
 	// SetContent 只防越过末行），viewport 会用空行补满底部。SetYOffset 自钳。
 	m.stateVP.SetYOffset(m.stateVP.YOffset)
 	m.detailVP.SetYOffset(m.detailVP.YOffset)
 }
 
+const (
+	defaultStreamShare = 60 // 实时输出默认占中栏高度的百分比
+	minStreamShare     = 20
+	maxStreamShare     = 80
+	streamShareStep    = 10
+)
+
+// streamSharePct 返回实时输出面板占中栏的百分比（Ctrl+↑↓ 可调，零值取默认）。
+func (m *Model) streamSharePct() int {
+	if m.streamShare <= 0 {
+		return defaultStreamShare
+	}
+	return m.streamShare
+}
+
+// adjustStreamShare 按步长调整实时输出面板高度占比并重排中栏两个 viewport。
+func (m *Model) adjustStreamShare(delta int) {
+	m.streamShare = min(maxStreamShare, max(minStreamShare, m.streamSharePct()+delta))
+	m.updateViewportSize()
+	m.refreshEventViewport()
+	m.refreshStreamViewport()
+}
+
 // splitHeights 计算事件流和流式输出的高度分配。
 func (m *Model) splitHeights(bodyH int) (eventH, streamH int) {
-	eventH = bodyH * 40 / 100
+	eventH = bodyH * (100 - m.streamSharePct()) / 100
 	if eventH < 3 {
 		eventH = 3
 	}
@@ -455,7 +485,7 @@ func (m *Model) inputHints() string {
 	limitHint := m.inputLimitHint()
 	// 欢迎页(modeNew)不开鼠标上报，终端原生拖拽即可复制，无需 Ctrl+R 提示；
 	// 工作台才开上报，复制需 Ctrl+R 临时关闭。
-	suffix := limitHint + " · Ctrl+R 切到选中复制模式"
+	suffix := limitHint + " · Ctrl+R 复制模式"
 	if m.mode == modeNew {
 		suffix = limitHint
 	}
@@ -484,17 +514,17 @@ func (m *Model) inputHints() string {
 	}
 	if m.mode == modeNew {
 		if m.startupMode == startupModeQuick {
-			return dimStyle.Render("Tab 切换启动模式 · 输入 / 搜索命令 · Enter 直接开始创作 · Esc 清空输入" + suffix)
+			return dimStyle.Render("Tab/Shift+Tab 启动模式 · / 搜索命令 · Ctrl+P/N 历史 · Enter 开始创作 · Esc 清空" + suffix)
 		}
-		return dimStyle.Render("Tab 切换启动模式 · 输入 / 搜索命令 · Enter 开始共创对话 · Esc 清空输入" + suffix)
+		return dimStyle.Render("Tab/Shift+Tab 启动模式 · / 搜索命令 · Ctrl+P/N 历史 · Enter 开始共创 · Esc 清空" + suffix)
 	}
 	switch m.snapshot.RuntimeState {
 	case "pausing":
 		return dimStyle.Render("正在暂停创作 · 请等待当前轮次结束" + suffix)
 	case "paused":
-		return dimStyle.Render("输入 / 搜索命令 · Enter 继续创作 · Esc 清空输入" + suffix)
+		return dimStyle.Render("Tab/Shift+Tab 面板 · Ctrl+P/N 历史 · Enter 继续 · Esc 清空" + suffix)
 	}
-	return dimStyle.Render("输入 / 搜索命令 · 点击/Tab 切换面板 · ↑↓ 滚动 · End 跳底 · Ctrl+L 清屏 · Esc 暂停 · Enter 发送" + suffix)
+	return dimStyle.Render("/ 命令 · Tab/Shift+Tab 面板 · ↑↓/PgUp 滚动 · Ctrl+P/N 历史 · Ctrl+↑↓ 分屏 · Ctrl+L 清屏 · End 底部 · Esc 暂停 · Enter 发送" + suffix)
 }
 
 func (m *Model) inputLimitHint() string {
@@ -509,27 +539,35 @@ func (m *Model) inputLimitHint() string {
 	return fmt.Sprintf(" · 输入 %d/%d", used, limit)
 }
 
+// eventFlowWidth 是中栏可用宽度。左右两栏的 lipgloss Width 不含各自那 1 列边框，
+// 这里必须把两列边框扣掉，否则整行比终端宽 2 列、右栏最右两列被渲染器静默裁掉。
 func (m *Model) eventFlowWidth() int {
 	if m.width == 0 {
 		return 80
 	}
 	leftW := m.sidebarWidth()
 	rightW := m.detailWidth()
-	return m.width - leftW - rightW
+	return max(20, m.width-leftW-rightW-2)
 }
 
+// sidebarMaxWidth 是左栏宽度上限：状态与用量行最宽约 40 列，宽屏再给它只会留白。
+const sidebarMaxWidth = 44
+
+// sidebarWidth 取 25% 但封顶；detailWidth 拿到左栏封顶后省下的宽度（大纲标题与简介
+// 都是越宽越少折行），中栏保持一半。
 func (m *Model) sidebarWidth() int {
 	if m.width == 0 {
 		return 32
 	}
-	return m.width * 23 / 100
+	return min(m.width*25/100, sidebarMaxWidth)
 }
 
 func (m *Model) detailWidth() int {
 	if m.width == 0 {
 		return 40
 	}
-	return m.width * 27 / 100
+	quarter := m.width * 25 / 100
+	return quarter + (quarter - m.sidebarWidth())
 }
 
 func (m *Model) bodyHeight() int {
@@ -635,6 +673,9 @@ func (m Model) View() string {
 	if m.report != nil {
 		return renderReportModal(m.width, m.height, m.report)
 	}
+	if m.library != nil {
+		return renderLibraryModal(m.width, m.height, m.library)
+	}
 	if m.importer != nil {
 		// 导入不依赖 Engine 运行态，动画帧直接取 spinnerIdx（currentSpinnerFrame 在引擎停机时返回空）。
 		return renderImportModal(m.width, m.height, m.importer, m.spinnerIdx)
@@ -653,11 +694,11 @@ func (m Model) View() string {
 		if m.err != nil {
 			errMsg = m.err.Error()
 		}
-		body = renderWelcome(m.width, bodyH, errMsg, m.startupMode, m.importHint, m.updateHint)
+		body = renderWelcome(m.width, bodyH, errMsg, m.startupMode, m.importHint, m.updateHint, m.recentBooks, m.outputDir())
 	} else {
 		leftW := m.sidebarWidth()
 		rightW := m.detailWidth()
-		centerW := m.width - leftW - rightW
+		centerW := m.eventFlowWidth() // 已扣掉左右两栏各 1 列边框
 		eventH, streamH := m.splitHeights(bodyH)
 
 		if m.viewport.Width != centerW-2 || m.viewport.Height != eventH-1 {
@@ -669,8 +710,8 @@ func (m Model) View() string {
 			m.streamVP.Height = streamH - 1 // -1 为 stream panel header 行
 		}
 
-		eventFlow := renderEventFlowViewport(m.viewport, centerW, eventH, m.paneHighlighted(focusEvents))
-		streamPanel := renderStreamPanel(m.streamVP, centerW, streamH, m.paneHighlighted(focusStream), m.snapshot.IsRunning || m.starting, m.spinnerIdx)
+		eventFlow := renderEventFlowViewport(m.viewport, centerW, eventH, m.paneHighlighted(focusEvents), m.autoScroll, len(m.events), runningEventCount(m.events))
+		streamPanel := renderStreamPanel(m.streamVP, centerW, streamH, m.paneHighlighted(focusStream), m.snapshot.IsRunning || m.starting, m.streamScroll, m.streamRound, m.spinnerIdx)
 		center := lipgloss.JoinVertical(lipgloss.Left, eventFlow, streamPanel)
 
 		left := renderStatePanel(m.stateVP, leftW, bodyH, m.paneHighlighted(focusState))

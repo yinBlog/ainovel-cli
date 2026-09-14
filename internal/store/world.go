@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -637,4 +638,37 @@ func (s *WorldStore) LoadRuleViolations(chapter int) []rules.Violation {
 		return nil
 	}
 	return latest
+}
+
+// LoadAllRuleViolations 读取每一章最新一条机械违规记录，按章号升序返回。
+// 追加式日志里同章可能有多条（返工后重写），只有最后一条代表当前状态。
+// 供只读的违规台账视图使用；没有记录返回空切片。
+func (s *WorldStore) LoadAllRuleViolations() []ChapterViolations {
+	s.io.mu.RLock()
+	defer s.io.mu.RUnlock()
+	data, err := os.ReadFile(s.io.path(ruleViolationsFile))
+	if err != nil {
+		return nil
+	}
+	latest := make(map[int]ChapterViolations)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec ChapterViolations
+		if json.Unmarshal([]byte(line), &rec) == nil {
+			latest[rec.Chapter] = rec
+		}
+	}
+	out := make([]ChapterViolations, 0, len(latest))
+	for _, rec := range latest {
+		// 重写后清空的章不占台账的版面：它已经没有问题了。
+		if len(rec.Violations) == 0 {
+			continue
+		}
+		out = append(out, rec)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Chapter < out[j].Chapter })
+	return out
 }

@@ -46,16 +46,22 @@ func configDir() (string, error) {
 
 // projectConfigPath 返回项目级配置文件的相对路径 ./.ainovel/config.json。
 // 项目级 dotdir 镜像全局 ~/.ainovel/，复用同一个 configDirName；相对 cwd 解析。
-func projectConfigPath() string {
-	return filepath.Join(configDirName, "config.json")
+// projectConfigPathIn 返回某个启动目录下的项目级配置路径。launchDir 为空时退化为
+// 当前工作目录的相对路径，与历史行为一致。
+func projectConfigPathIn(launchDir string) string {
+	return filepath.Join(launchDir, configDirName, "config.json")
 }
 
 // EffectiveConfigPath 返回 TUI 改动（/config、/model）应写回的配置文件：
 // 项目目录有 ./.ainovel/config.json 就写它——与读取时项目层覆盖全局的方向一致，
 // 保证"改当前生效的那份"、改完立刻生效；否则写全局 ~/.ainovel/config.json。
 // 仅编辑已存在的项目配置，不会凭空创建（创建项目覆盖是用户主动放文件的动作）。
-func EffectiveConfigPath() string {
-	rel := projectConfigPath()
+func EffectiveConfigPath() string { return EffectiveConfigPathIn("") }
+
+// EffectiveConfigPathIn 是 EffectiveConfigPath 的按书版本：切书后 /channel、/model
+// 的改动要写回新书自己的那份项目配置，而不是进程启动时那本的。
+func EffectiveConfigPathIn(launchDir string) string {
+	rel := projectConfigPathIn(launchDir)
 	if _, err := os.Stat(rel); err == nil {
 		if abs, err := filepath.Abs(rel); err == nil {
 			return abs
@@ -68,7 +74,12 @@ func EffectiveConfigPath() string {
 // LoadConfig 按优先级加载并合并配置：
 //  1. ~/.ainovel/config.json（全局）
 //  2. ./.ainovel/config.json（项目级覆盖）
-func LoadConfig() (Config, error) {
+func LoadConfig() (Config, error) { return LoadConfigFor("") }
+
+// LoadConfigFor 按指定启动目录加载配置：全局基底 + <launchDir>/.ainovel/config.json。
+// launchDir 为空表示当前工作目录。切书时用目标书的启动目录重新加载整份配置——
+// per-book 覆盖必须跟着新书走，不能沿用上一本的。
+func LoadConfigFor(launchDir string) (Config, error) {
 	var cfg Config
 
 	// 1. 全局配置。它是最低优先级基底，坏文件降级为告警而非阻断——可被项目级覆盖；
@@ -85,13 +96,14 @@ func LoadConfig() (Config, error) {
 
 	// 2. 项目级覆盖。坏文件 fail loud：用户在当前目录主动放的配置，静默吞掉会让
 	//    "配了不生效"无从排查（issue #37）。
-	project, found, err := loadOptionalJSON(projectConfigPath())
+	project, found, err := loadOptionalJSON(projectConfigPathIn(launchDir))
 	if err != nil {
-		return cfg, fmt.Errorf("项目级配置 ./.ainovel/config.json 解析失败（请检查 JSON 语法）: %w", err)
+		return cfg, fmt.Errorf("项目级配置 %s 解析失败（请检查 JSON 语法）: %w", projectConfigPathIn(launchDir), err)
 	}
 	if found {
 		cfg = mergeConfig(cfg, project)
 	}
+	cfg.LaunchDir = launchDir
 
 	return cfg, nil
 }
@@ -205,6 +217,16 @@ func mergeConfig(base, overlay Config) Config {
 		}
 	}
 
+	// ChannelPresets: overlay 的渠道覆盖 base 同名渠道（整条记忆一起换，不逐槽位拼）
+	if len(overlay.ChannelPresets) > 0 {
+		if base.ChannelPresets == nil {
+			base.ChannelPresets = make(map[string]ChannelPreset)
+		}
+		for channel, preset := range overlay.ChannelPresets {
+			base.ChannelPresets[channel] = preset.clone()
+		}
+	}
+
 	// Budget / Notify：整块覆盖（项目级预算/告警是独立政策声明，不与全局逐字段拼接）
 	if overlay.Budget != (BudgetConfig{}) {
 		base.Budget = overlay.Budget
@@ -245,6 +267,10 @@ func CloneConfig(cfg Config) Config {
 	for role, rc := range cfg.Roles {
 		rc.Fallbacks = append([]ModelRef(nil), rc.Fallbacks...)
 		clone.Roles[role] = rc
+	}
+	clone.ChannelPresets = make(map[string]ChannelPreset, len(cfg.ChannelPresets))
+	for channel, preset := range cfg.ChannelPresets {
+		clone.ChannelPresets[channel] = preset.clone()
 	}
 	clone.Notify.Events = append([]string(nil), cfg.Notify.Events...)
 	return clone

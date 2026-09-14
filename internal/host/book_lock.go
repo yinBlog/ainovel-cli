@@ -58,3 +58,33 @@ func (l *bookLease) Close() error {
 	l.lock = nil
 	return err
 }
+
+// BookInUse 探测某个小说目录是否已被占用。只试锁、立刻释放，不改变任何状态，
+// 供书架在列出时把"别的终端正在写"的书标灰——避免用户切过去才撞 ErrBookInUse。
+//
+// 两个必须知道的前提：
+//  1. flock 是按打开的文件而不是按进程判定的，所以**当前进程自己正在写的那本书
+//     也会返回 true**。调用方必须先排除当前这本，否则会把自己标成"使用中"。
+//  2. 探测本身会短暂持有锁（微秒级）。这个窗口里另一个进程的 acquireBookLease
+//     会失败。flock 没有"只读锁状态"的可移植做法，所以只在用户主动打开书架时
+//     探一次，不要放进任何轮询路径。
+func BookInUse(dir string) bool {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	if _, err := os.Stat(absDir); err != nil {
+		return false // 目录不存在：交给上层的“目录已不存在”提示，不是占用
+	}
+	fileLock := flock.New(filepath.Join(absDir, bookLockFile), flock.SetPermissions(0o600))
+	locked, err := fileLock.TryLock()
+	if err != nil {
+		_ = fileLock.Close()
+		return false // 探测失败不阻断用户操作，真正的冲突留给切换时的 acquireBookLease
+	}
+	if locked {
+		_ = fileLock.Unlock()
+	}
+	_ = fileLock.Close()
+	return !locked
+}

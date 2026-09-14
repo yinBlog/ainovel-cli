@@ -78,6 +78,8 @@ func (m Model) handleOverlayKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		return m.handleBlockingModalKey(msg, m.handleModelSwitchKey)
 	case m.report != nil:
 		return m.handleBlockingModalKey(msg, m.handleReportKey)
+	case m.library != nil:
+		return m.handleBlockingModalKey(msg, m.handleLibraryKey)
 	case m.importer != nil:
 		return m.handleBlockingModalKey(msg, m.handleImportKey)
 	case m.simulator != nil:
@@ -154,6 +156,11 @@ func (m Model) handleCommandPaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool
 	case tea.KeyTab:
 		m.acceptCommandCompletion()
 		return m, nil, true
+	case tea.KeyShiftTab:
+		if m.compIdx > 0 {
+			m.compIdx--
+		}
+		return m, nil, true
 	case tea.KeyEnter:
 		item, ok := m.acceptCommandCompletion()
 		if !ok {
@@ -192,6 +199,13 @@ func (m Model) handleBaseKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlL:
 		m.resetOutputPanels()
 		return m, nil
+	case tea.KeyCtrlUp:
+		// 写作阶段把实时输出放大；事件流缩到最小 20%。
+		m.adjustStreamShare(streamShareStep)
+		return m, nil
+	case tea.KeyCtrlDown:
+		m.adjustStreamShare(-streamShareStep)
+		return m, nil
 	case tea.KeyCtrlU:
 		// 清空当前输入；同时退出历史浏览态。
 		m.textarea.Reset()
@@ -217,6 +231,21 @@ func (m Model) handleBaseKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.focusPane = (m.focusPane + 1) % focusPaneCount
 		return m, nil
+	case tea.KeyShiftTab:
+		if m.mode == modeNew {
+			if m.cocreate != nil {
+				return m, nil
+			}
+			if m.startupMode == startupModeQuick {
+				m.startupMode = startupModeCoCreate
+			} else {
+				m.startupMode = startupModeQuick
+			}
+			m.textarea.Placeholder = placeholderForNewMode(m.startupMode)
+			return m, nil
+		}
+		m.focusPane = (m.focusPane - 1 + focusPaneCount) % focusPaneCount
+		return m, nil
 	case tea.KeyEnter:
 		// Alt+Enter 是主动换行，让 textarea.Update 接管（KeyMap.InsertNewline 已绑到此键）。
 		if msg.Alt {
@@ -232,22 +261,32 @@ func (m Model) handleBaseKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m.handleEnterKey()
-	case tea.KeyUp:
-		// 多行输入：让 textarea 接管光标行内移动（落到 switch 后的 textarea.Update）
+	case tea.KeyCtrlP:
 		if m.textareaIsMultiline() {
 			break
 		}
-		// 单行：优先翻历史，没有可用历史时回退到事件流滚动
 		if m.tryHistoryUp() {
 			return m, nil
 		}
-		return m.handleVerticalScrollKey(msg, true)
-	case tea.KeyDown:
+		return m, nil
+	case tea.KeyCtrlN:
 		if m.textareaIsMultiline() {
 			break
 		}
 		if m.tryHistoryDown() {
 			return m, nil
+		}
+		return m, nil
+	case tea.KeyUp:
+		// 多行输入：让 textarea 接管光标行内移动（落到 switch 后的 textarea.Update）
+		if m.textareaIsMultiline() {
+			break
+		}
+		// 单行输入不再与历史记录抢 ↑↓：↑↓ 始终滚动当前面板，历史使用 Ctrl+P/N。
+		return m.handleVerticalScrollKey(msg, true)
+	case tea.KeyDown:
+		if m.textareaIsMultiline() {
+			break
 		}
 		return m.handleVerticalScrollKey(msg, false)
 	case tea.KeyPgUp:
@@ -469,7 +508,11 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, fetchSnapshot(m.runtime), true
 	case snapshotMsg:
-		next := host.UISnapshot(msg)
+		if msg.rt != m.runtime {
+			// 切书后旧 Host 的迟到快照：丢弃，也不再为它续 tick。
+			return m, nil, true
+		}
+		next := msg.snap
 		detailChanged := !sameDetailSnapshot(m.snapshot, next)
 		runningChanged := m.snapshot.IsRunning != next.IsRunning
 		m.snapshot = next
@@ -668,7 +711,7 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		m.spinnerIdx = (m.spinnerIdx + 1) % len(spinnerFrames)
 		m.cursorIdx++
 		if m.snapshot.IsRunning {
-			// 顶栏、活动提示和流式光标共用低频动画，避免多条常驻 timer 重复触发全屏 View。
+			// 顶栏和流式光标共用低频动画，避免多条常驻 timer 重复触发全屏 View。
 			m.refreshEventViewport()
 			m.refreshStreamViewport()
 			m.streamDirty = false
@@ -734,12 +777,15 @@ func (m Model) handleRuntimeMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 func sameDetailSnapshot(a, b host.UISnapshot) bool {
 	return a.Synopsis == b.Synopsis &&
 		a.Premise == b.Premise &&
+		a.Phase == b.Phase &&
+		a.Flow == b.Flow &&
 		a.Layered == b.Layered &&
 		a.CurrentVolumeArc == b.CurrentVolumeArc &&
 		a.NextVolumeTitle == b.NextVolumeTitle &&
 		a.CompassDirection == b.CompassDirection &&
 		a.CompassScale == b.CompassScale &&
 		a.SupportingCount == b.SupportingCount &&
+		a.CurrentChapter == b.CurrentChapter &&
 		a.CompletedCount == b.CompletedCount &&
 		a.InProgressChapter == b.InProgressChapter &&
 		a.LastCommitSummary == b.LastCommitSummary &&

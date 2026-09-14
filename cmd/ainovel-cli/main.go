@@ -31,6 +31,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "eval" {
 		os.Exit(eval.Command(os.Args[2:]))
 	}
+	// books / chapters / read 是只读书架子命令：不加载配置、不取小说目录租约。
+	if len(os.Args) > 1 && libraryCommands[os.Args[1]] {
+		os.Exit(runLibraryCommand(os.Args[1], os.Args[2:], os.Stdout, os.Stderr))
+	}
 
 	opts, args, err := parseCLIOptions(os.Args[1:])
 	if err != nil {

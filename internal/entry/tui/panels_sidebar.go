@@ -11,10 +11,13 @@ import (
 )
 
 // renderStateContent 生成状态侧栏的纯内容(不含边框/外框)，供 stateVP.SetContent 使用。
+// 紧凑版式：区块头"标题 ───"下直接排行、无卡片竖线；概览压成 2~4 行，每个角色不超过 2 行，
+// 返工 / 干预 / 停靠合并为一个"待处理"区块。
 func renderStateContent(snap host.UISnapshot, contentW int) string {
 	contentW = max(12, contentW)
 	agents := sidebarAgents(snap.Agents)
 	idleAgents := sidebarIdleAgents(snap.Agents)
+	dim := lipgloss.NewStyle().Foreground(colorDim)
 	var sections []string
 
 	if snap.RecoveryLabel != "" {
@@ -23,44 +26,48 @@ func renderStateContent(snap host.UISnapshot, contentW int) string {
 	}
 
 	var overview strings.Builder
-	overview.WriteString(renderField("运行态", snapshotRuntimeStateLabel(snap.RuntimeState)))
-	overview.WriteString(renderField("阶段", snapshotPhaseLabel(snap.Phase)))
-	overview.WriteString(renderField("流程", snapshotFlowLabel(snap.Flow)))
-	if snap.AdvanceMode == "review" {
-		advance := "逐章验收"
+	// 状态：运行态 · 阶段/流程 · 推进政策
+	phase := snapshotPhaseLabel(snap.Phase)
+	state := snapshotRuntimeStateLabel(snap.RuntimeState) + " · " + phase
+	if flow := snapshotFlowLabel(snap.Flow); flow != "-" && flow != phase {
+		state += "/" + flow
+	}
+	switch snap.AdvanceMode {
+	case "review":
 		if snap.AdvancePermitChapter > 0 {
-			advance = fmt.Sprintf("已放行第 %d 章", snap.AdvancePermitChapter)
+			state += fmt.Sprintf(" · 已放行第 %d 章", snap.AdvancePermitChapter)
+		} else {
+			state += " · 逐章验收"
 		}
-		overview.WriteString(renderField("推进", advance))
-	} else if snap.AdvanceMode == "auto" {
-		overview.WriteString(renderField("推进", "自动"))
+	case "auto":
+		state += " · 自动"
 	}
-	if snap.Layered {
-		overview.WriteString(renderField("已完成", fmt.Sprintf("%d 章", snap.CompletedCount)))
-		// 分层动态规划：右栏只展示当前弧已展开的章节，"已规划"也用同一个口径，
-		// 否则会把骨架弧 EstimatedChapters 的粗估算（如 92）混进来，与可见大纲对不上。
-		// progress.TotalChapters 那个值仅用于内部 ContextProfile 决策，不要泄漏到 UI。
+	overview.WriteString(renderCompactField("状态", state, contentW))
+	// 进度：章数 · 字数
+	var progress string
+	switch {
+	case snap.Layered:
+		// 分层动态规划只展示当前弧已展开的章节，不泄漏骨架弧的粗估算。
+		progress = fmt.Sprintf("%d 章", snap.CompletedCount)
 		if planned := len(snap.Outline); planned > 0 {
-			overview.WriteString(renderField("已规划", fmt.Sprintf("%d 章", planned)))
+			progress += fmt.Sprintf("/规划 %d", planned)
 		}
-	} else {
-		switch {
-		case snap.TotalChapters > 0:
-			overview.WriteString(renderField("进度", fmt.Sprintf("%d / %d 章", snap.CompletedCount, snap.TotalChapters)))
-		default:
-			overview.WriteString(renderField("已完成", fmt.Sprintf("%d 章", snap.CompletedCount)))
-		}
+	case snap.TotalChapters > 0:
+		progress = fmt.Sprintf("%d/%d 章", snap.CompletedCount, snap.TotalChapters)
+	default:
+		progress = fmt.Sprintf("%d 章", snap.CompletedCount)
 	}
-	overview.WriteString(renderField("字数", formatNumber(snap.TotalWordCount)))
+	progress += " · " + formatNumber(snap.TotalWordCount) + " 字"
+	overview.WriteString(renderCompactField("进度", progress, contentW))
 	if label, ch := inProgressDisplay(snap); label != "" {
-		overview.WriteString(renderField(label, fmt.Sprintf("第 %d 章", ch)))
+		overview.WriteString(renderCompactField("当前", fmt.Sprintf("%s 第 %d 章", label, ch), contentW))
 	}
 	if headline := snapshotHeadline(snap); headline != "" {
-		label := "当前"
+		label := "待办"
 		if !snap.IsRunning {
 			label = "待恢复"
 		}
-		overview.WriteString(renderHighlightField(label, truncate(headline, contentW-10)))
+		overview.WriteString(renderCompactHighlight(label, headline, contentW))
 	}
 	sections = append(sections, renderSidebarSection("概览", overview.String(), contentW))
 
@@ -71,52 +78,120 @@ func renderStateContent(snap host.UISnapshot, contentW int) string {
 			agentBody.WriteString("\n")
 		}
 		if len(idleAgents) > 0 {
-			agentBody.WriteString(lipgloss.NewStyle().Foreground(colorDim).Render("待命: " + truncate(strings.Join(idleAgents, " · "), max(8, contentW-2))))
-			agentBody.WriteString("\n")
+			for _, l := range wrapAtSeparators("待命 "+strings.Join(idleAgents, " · "), contentW) {
+				agentBody.WriteString(dim.Render(l))
+				agentBody.WriteString("\n")
+			}
 		}
-		sections = append(sections, renderSidebarSection("运行角色", agentBody.String(), contentW))
+		sections = append(sections, renderSidebarSection("角色", agentBody.String(), contentW))
 	}
 
+	// 待处理块里全是"我现在需要做什么"：返工原因、用户自己输的干预方向、停靠原因。
+	// 截断等于这一块白开，所以折行给全——侧栏本身是可滚动的 viewport，放得下。
+	var pending strings.Builder
 	if len(snap.PendingRewrites) > 0 {
-		var rewrite strings.Builder
-		rewrite.WriteString(renderHighlightField("队列", fmt.Sprintf("%v", snap.PendingRewrites)))
+		line := fmt.Sprintf("返工 %v", snap.PendingRewrites)
 		if snap.RewriteReason != "" {
-			rewrite.WriteString(renderField("原因", truncate(snap.RewriteReason, contentW-10)))
+			line += " · " + snap.RewriteReason
 		}
-		sections = append(sections, renderSidebarSection("返工", rewrite.String(), contentW))
+		writeIndented(&pending, line, contentW, 2, highlightValueStyle)
 	}
-
 	if snap.PendingSteer != "" {
-		sections = append(sections, renderSidebarSection("干预",
-			renderHighlightField("待处理", truncate(snap.PendingSteer, contentW-10)), contentW))
+		writeIndented(&pending, "干预 "+snap.PendingSteer, contentW, 2, highlightValueStyle)
 	}
 	if snap.HasAdvanceHold {
-		sections = append(sections, renderSidebarSection("验收停靠",
-			renderHighlightField("等待", truncate(snap.AdvanceHoldReason, contentW-10)), contentW))
+		writeIndented(&pending, "停靠 "+snap.AdvanceHoldReason, contentW, 2, highlightValueStyle)
+	}
+	if pending.Len() > 0 {
+		sections = append(sections, renderSidebarSection("待处理", pending.String(), contentW))
+	}
+
+	// 创作结果优先于遥测明细：最近提交/审阅紧跟运行态与待处理事项，
+	// 避免在常见高度下被角色用量和缓存统计挤到首屏之外。
+	if snap.LastCommitSummary != "" {
+		var body strings.Builder
+		writeWrapped(&body, snap.LastCommitSummary, contentW, cardContentStyle)
+		sections = append(sections, renderSidebarSection("最近提交", body.String(), contentW))
+	}
+	if snap.LastReviewSummary != "" {
+		var body strings.Builder
+		writeWrapped(&body, snap.LastReviewSummary, contentW, cardContentStyle)
+		sections = append(sections, renderSidebarSection("最近审阅", body.String(), contentW))
 	}
 
 	if body := renderUsageSidebar(snap, contentW); body != "" {
 		sections = append(sections, renderSidebarSection("用量", body, contentW))
 	}
-
 	if body := renderCacheSidebar(snap, contentW); body != "" {
 		sections = append(sections, renderSidebarSection("缓存", body, contentW))
 	}
 
-	return strings.Join(sections, "\n\n")
+	// 多章摘要通常最长，保留在侧栏底部供主动滚动回看。
+	if len(snap.RecentSummaries) > 0 {
+		var body strings.Builder
+		for _, s := range snap.RecentSummaries {
+			writeWrapped(&body, s, contentW, cardContentStyle)
+		}
+		sections = append(sections, renderSidebarSection("摘要", body.String(), contentW))
+	}
+
+	return strings.Join(sections, "\n")
 }
 
+// renderCompactField 是侧栏紧凑键值行：两字标签 + 值，标签列固定 5 列。
+// 值超过 width 时按视觉宽度折行、续行悬挂缩进到值列——窄栏下宁多一行也不截断丢信息。
+func renderCompactField(label, value string, width int) string {
+	if value == "" {
+		value = "-"
+	}
+	return renderHangingField(compactLabelStyle.Render(label), value, fieldValueStyle, width)
+}
+
+func renderCompactHighlight(label, value string, width int) string {
+	return renderHangingField(compactLabelStyle.Render(label), value, highlightValueStyle, width)
+}
+
+func renderHangingField(labelCell, value string, style lipgloss.Style, width int) string {
+	labelW := lipgloss.Width(labelCell)
+	var b strings.Builder
+	for i, line := range wrapAtSeparators(value, max(6, width-labelW)) {
+		if i == 0 {
+			b.WriteString(labelCell)
+		} else {
+			b.WriteString(strings.Repeat(" ", labelW))
+		}
+		b.WriteString(style.Render(line))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// renderAgentLine 渲染一个运行角色：首行 状态点 + 角色色名字 + 任务 · ctx；
+// 次行为当前工具或摘要，仅在存在且与任务不同的时候出现。
 func renderAgentLine(agent host.AgentSnapshot, width int) string {
 	stateColor := taskStatusColor(agent.State)
 	icon := lipgloss.NewStyle().Foreground(stateColor).Render(agentStateIcon(agent.State))
-	badge := lipgloss.NewStyle().Foreground(stateColor).Render(agentStateLabel(agent.State))
-	name := lipgloss.NewStyle().Bold(true).Foreground(bodyTextColor).Render(agentDisplayName(agent.Name))
-	line := icon + " " + name + " " + badge
-
+	name := lipgloss.NewStyle().Bold(true).Foreground(eventAgentColor(agent.Name)).Render(sidebarAgentName(agent.Name))
+	muted := lipgloss.NewStyle().Foreground(colorMuted)
+	sep := lipgloss.NewStyle().Foreground(colorDim).Render(" · ")
+	// ctx 占用放在任务前：它是窄栏下最不该被截掉的健康信号。
+	var meta []string
+	if agent.State != "running" {
+		meta = append(meta, muted.Render(agentStateLabel(agent.State)))
+	}
+	if ctx := agentContextLine(agent); ctx != "" {
+		meta = append(meta, ctx)
+	}
 	taskLine := agentTaskLine(agent)
 	if taskLine != "" {
-		line += "\n" + lipgloss.NewStyle().Foreground(colorDim).Render("  "+truncate(taskLine, max(8, width-2)))
+		meta = append(meta, muted.Render(taskLine))
 	}
+	head := icon + " " + name
+	if len(meta) > 0 {
+		head += " " + strings.Join(meta, sep)
+	}
+	// 与用量 / 缓存行同款：按 " · " 折行，续行缩进，不截断。
+	line := strings.TrimRight(wrapStyledInline(head, width), "\n")
 
 	detail := agent.Summary
 	if agent.Tool != "" {
@@ -126,28 +201,82 @@ func renderAgentLine(agent host.AgentSnapshot, width int) string {
 		detail = ""
 	}
 	if detail != "" && detail != taskLine {
-		line += "\n" + lipgloss.NewStyle().Foreground(colorMuted).Render("  "+truncate(detail, max(8, width-2)))
-	}
-	if ctx := agentContextLine(agent); ctx != "" {
-		line += "\n" + lipgloss.NewStyle().Foreground(colorDim).Italic(true).Render("  "+truncate(ctx, max(8, width-2)))
+		line += "\n" + lipgloss.NewStyle().Foreground(colorDim).Render("  "+truncate(detail, max(8, width-2)))
 	}
 	return line
 }
 
+// wrapAtSeparators 把纯文本按 " · " 分段贪心装行：整段放不下就换行，单段仍超宽再按字符硬折。
+// 侧栏的"状态 / 进度"值由若干短语用 " · " 拼成，按短语折行比按字符折可读得多。
+func wrapAtSeparators(value string, width int) []string {
+	if lipgloss.Width(value) <= width {
+		return []string{value}
+	}
+	const sep = " · "
+	var lines []string
+	cur := ""
+	for _, part := range strings.Split(value, sep) {
+		candidate := part
+		if cur != "" {
+			candidate = cur + sep + part
+		}
+		if cur != "" && lipgloss.Width(candidate) > width {
+			lines = append(lines, cur)
+			cur = part
+			continue
+		}
+		cur = candidate
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	var out []string
+	for _, l := range lines {
+		out = append(out, wrapRunes(l, width)...)
+	}
+	return out
+}
+
+// wrapStyledInline 把一条带样式的内联行按 " · " 分段折成多行（续行缩进 2 列），
+// 每行以 "\n" 结尾。段与段之间是独立的样式片段，所以按分隔符切开不会破坏 ANSI 序列；
+// 单段仍超宽时按截断兜底。
+func wrapStyledInline(line string, width int) string {
+	if lipgloss.Width(line) <= width {
+		return line + "\n"
+	}
+	sep := lipgloss.NewStyle().Foreground(colorDim).Render(" · ")
+	parts := strings.Split(line, sep)
+	var b strings.Builder
+	cur := ""
+	flush := func() {
+		if cur != "" {
+			b.WriteString(fitInlineLine(cur, width))
+			b.WriteString("\n")
+		}
+	}
+	for _, p := range parts {
+		candidate := p
+		if cur != "" {
+			candidate = cur + sep + p
+		}
+		if cur != "" && lipgloss.Width(candidate) > width {
+			flush()
+			cur = "  " + p
+			continue
+		}
+		cur = candidate
+	}
+	flush()
+	return b.String()
+}
+
+// renderSidebarSection 渲染"标题 ───"区块头 + 内容；无卡片竖线与内边距，内容顶格。
 func renderSidebarSection(title, body string, width int) string {
 	body = strings.TrimRight(body, "\n")
 	if body == "" {
 		return ""
 	}
-	lineW := max(0, width-lipgloss.Width(title)-1)
-	header := panelTitleStyle.Render(title) + " " +
-		lipgloss.NewStyle().Foreground(colorDim).Render(strings.Repeat("─", lineW))
-	card := lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(colorDim).
-		PaddingLeft(1).
-		Render(body)
-	return header + "\n" + card
+	return renderRuledHeader(title, width) + "\n" + body
 }
 
 func sidebarAgents(agents []host.AgentSnapshot) []host.AgentSnapshot {
@@ -171,6 +300,15 @@ func sidebarAgents(agents []host.AgentSnapshot) []host.AgentSnapshot {
 	return out
 }
 
+// sidebarAgentName 是侧栏用的短角色名：architect_long / architect_short 都显示 ARCHITECT
+// （规划师的长短之分对用户是实现细节），其余与事件流一致的大写名。
+func sidebarAgentName(name string) string {
+	if strings.HasPrefix(name, "architect") {
+		return "ARCHITECT"
+	}
+	return agentDisplayName(name)
+}
+
 func sidebarIdleAgents(agents []host.AgentSnapshot) []string {
 	var names []string
 	hasActive := false
@@ -179,7 +317,7 @@ func sidebarIdleAgents(agents []host.AgentSnapshot) []string {
 			hasActive = true
 			continue
 		}
-		names = append(names, agentDisplayName(agent.Name))
+		names = append(names, sidebarAgentName(agent.Name))
 	}
 	if !hasActive {
 		return nil
@@ -296,19 +434,25 @@ func renderUsageSidebar(snap host.UISnapshot, width int) string {
 	if snap.TotalInputTokens <= 0 && snap.TotalOutputTokens <= 0 && snap.TotalCostUSD <= 0 {
 		return ""
 	}
+	dim := lipgloss.NewStyle().Foreground(colorDim)
+	val := lipgloss.NewStyle().Foreground(bodyTextColor)
 	var b strings.Builder
-	b.WriteString(renderField("输入", formatTokensCompact(snap.TotalInputTokens)))
-	b.WriteString(renderField("输出", formatTokensCompact(snap.TotalOutputTokens)))
+	// 首行合并会话累计：↑输入 ↓输出 · 费用/预算 百分比 · 省
+	line := dim.Render("↑") + val.Render(formatTokensCompact(snap.TotalInputTokens)) + " " +
+		dim.Render("↓") + val.Render(formatTokensCompact(snap.TotalOutputTokens))
 	if cost := formatCostUSD(snap.TotalCostUSD); cost != "" {
-		b.WriteString(renderField("费用", cost))
+		line += dim.Render(" · ") + val.Render(cost)
+		if snap.BudgetLimitUSD > 0 {
+			pct := snap.TotalCostUSD / snap.BudgetLimitUSD * 100
+			line += dim.Render(fmt.Sprintf("/%s %.0f%%", formatCostUSD(snap.BudgetLimitUSD), pct))
+		}
+	} else if snap.BudgetLimitUSD > 0 {
+		line += dim.Render(" · ") + dim.Render("预算 "+formatCostUSD(snap.BudgetLimitUSD))
 	}
 	if saved := formatCostUSD(snap.TotalSavedUSD); saved != "" {
-		b.WriteString(renderField("节省", saved))
+		line += dim.Render(" · ") + dim.Render("省"+saved)
 	}
-	if snap.BudgetLimitUSD > 0 {
-		pct := snap.TotalCostUSD / snap.BudgetLimitUSD * 100
-		b.WriteString(renderField("预算", fmt.Sprintf("$%.2f/$%.2f (%.0f%%)", snap.TotalCostUSD, snap.BudgetLimitUSD, pct)))
-	}
+	b.WriteString(wrapStyledInline(line, width))
 
 	agentStats := usageStatsByCost(snap.CachePerAgent)
 	if len(agentStats) > 0 {
@@ -316,14 +460,14 @@ func renderUsageSidebar(snap host.UISnapshot, width int) string {
 		limit := min(len(agentStats), 4)
 		for i := 0; i < limit; i++ {
 			a := agentStats[i]
-			b.WriteString(renderUsageLine(agentDisplayName(a.Role), eventAgentColor(a.Role), a.Input, a.Output, a.Cost, width))
+			b.WriteString(renderUsageLine(sidebarAgentName(a.Role), eventAgentColor(a.Role), a.Input, a.Output, a.Cost, width))
 			b.WriteString("\n")
 		}
 	}
 	modelStats := usageStatsByCost(snap.CachePerModel)
 	if len(modelStats) > 0 {
 		b.WriteString(renderUsageGroupHeader("模型", width))
-		limit := min(len(modelStats), 4)
+		limit := min(len(modelStats), 3)
 		for i := 0; i < limit; i++ {
 			a := modelStats[i]
 			b.WriteString(renderUsageLine(modelDisplayName(a.Model), bodyTextColor, a.Input, a.Output, a.Cost, width))
@@ -351,9 +495,14 @@ func renderUsageGroupHeader(label string, width int) string {
 }
 
 func renderUsageLine(name string, color lipgloss.TerminalColor, input, output int, cost float64, width int) string {
+	// 名称列：常规 11 列；窄栏 8 列；宽栏（≥40）把多出来的宽度让给名称（上限 18），
+	// 右侧 "1.3M · $3.20" 约需 13 列始终保留。
 	nameW := 11
-	if width < 24 {
+	switch {
+	case width < 24:
 		nameW = 8
+	case width >= 40:
+		nameW = min(18, width-14)
 	}
 	nameCell := lipgloss.NewStyle().Foreground(color).Width(nameW).
 		Render(truncate(name, nameW))
@@ -387,14 +536,12 @@ func modelDisplayName(model string) string {
 // 三种态：
 //  1. 完全没消费 token：返回空，section 不渲染
 //  2. 当前会话所有 role 都跑的是不支持 prompt cache 的模型：仅渲染一行"未启用"提示
-//  3. 已启用：顶部"命中率累计/近10 · 节省 · 读/写"+ 分隔 + per-role 行
+//  3. 已启用：两行汇总（命中率 / 读写量与断裂）+ per-role 行
 //
-// per-role 行 capable 时显示"累计/近10%"双数字；不 capable 时显示"未启用"。
-// 通过累计 vs 近 N 次的对比可以识别"前期拖累"vs"稳态低命中"。
+// per-role 行 capable 时显示"累计/近10%"；不 capable 时显示"未启用"。
 func renderCacheSidebar(snap host.UISnapshot, width int) string {
 	// 上游 streaming 没发 OpenAI 的 final usage chunk —— 累计数据全为 0，
-	// 但这不是"没启用 cache"也不是"用量太低被门控藏起来"，必须显式提示，
-	// 否则用户会一直以为左栏写了缓存代码却显示不出来。优先级最高。
+	// 但这不是"没启用 cache"也不是"用量太低被门控藏起来"，必须显式提示。优先级最高。
 	if snap.MissingAssistantUsage > 0 && snap.TotalInputTokens <= 0 {
 		warn := lipgloss.NewStyle().Foreground(colorError).Bold(true).
 			Render(fmt.Sprintf("⚠ 上游未返 usage（%d 次）", snap.MissingAssistantUsage))
@@ -413,57 +560,40 @@ func renderCacheSidebar(snap host.UISnapshot, width int) string {
 			Render(truncate("当前模型未启用 prompt cache", max(8, width-2))) + "\n"
 	}
 
+	dim := lipgloss.NewStyle().Foreground(colorDim)
+	val := lipgloss.NewStyle().Foreground(bodyTextColor)
 	var b strings.Builder
 
-	// 顶部综合指标：累计 + 近 N 各占一行，标签明示，避免 "X% · 近N Y%" 这种
-	// 三种分隔符（百分号 / 中点 / 文字）混杂导致语义不清。
+	// 第一行：累计命中 · 近 N 命中 · 节省
 	overallHit := cacheHitRate(snap.TotalCacheReadTokens, snap.TotalInputTokens)
-	b.WriteString(renderField("累计命中", colorPercent(overallHit)))
+	line := dim.Render("累计 ") + colorPercent(overallHit)
 	if snap.OverallRecentSamples > 0 && snap.OverallRecentInput > 0 {
 		recent := cacheHitRate(snap.OverallRecentCacheRead, snap.OverallRecentInput)
-		b.WriteString(renderField(fmt.Sprintf("近%d命中", snap.OverallRecentSamples), colorPercent(recent)))
+		line += dim.Render(" · ") + dim.Render(fmt.Sprintf("近%d ", snap.OverallRecentSamples)) + colorPercent(recent)
 	}
-
 	if savedStr := formatCostUSD(snap.TotalSavedUSD); savedStr != "" {
-		b.WriteString(renderField("节省", savedStr))
+		line += dim.Render(" · ") + dim.Render("省"+savedStr)
 	}
+	b.WriteString(wrapStyledInline(line, width))
 
-	// 读/写量分两行。写量为 0 在 OpenAI / Gemini 系协议是常态——
-	// 这两家是自动透明 caching，cache 写入完全免费（首次未命中按正常输入价，
-	// 建立 cache 不收任何溢价），所以协议本身不暴露 cache_creation 字段，没必要。
-	// 只有 Anthropic / Bedrock 系才报写量，因为他们写要加价（5m +25%/1h +100%），
-	// 必须把这个量给用户用于计费。
-	b.WriteString(renderField("缓存读量", formatTokensCompact(snap.TotalCacheReadTokens)))
+	// 第二行：读量 · 写量（OpenAI / Gemini 系自动缓存无溢价、不报写量）· 断裂次数
+	line = dim.Render("读 ") + val.Render(formatTokensCompact(snap.TotalCacheReadTokens))
 	if snap.TotalCacheWriteTokens > 0 {
-		b.WriteString(renderField("缓存写量", formatTokensCompact(snap.TotalCacheWriteTokens)))
-	} else if snap.TotalCacheReadTokens > 0 {
-		hint := lipgloss.NewStyle().Foreground(colorDim).Italic(true).Render("(自动缓存无溢价)")
-		b.WriteString(renderField("缓存写量", "0 "+hint))
+		line += dim.Render(" · ") + dim.Render("写 ") + val.Render(formatTokensCompact(snap.TotalCacheWriteTokens))
 	}
-
-	// 断裂 = 前缀未缩短而命中骤降（合法下降如换章/压缩已豁免）。次数多通常
-	// 指向服务端逐出或中转轮询上游，详情看 tui.log 的"缓存链断裂"warn。
 	if snap.TotalCacheBreaks > 0 {
-		v := lipgloss.NewStyle().Foreground(colorReview).Render(fmt.Sprintf("%d 次", snap.TotalCacheBreaks))
-		b.WriteString(renderField("链路断裂", v))
+		// 断裂 = 前缀未缩短而命中骤降；次数多通常指向服务端逐出或中转轮询上游，详情看 tui.log。
+		line += dim.Render(" · ") + lipgloss.NewStyle().Foreground(colorReview).Render(fmt.Sprintf("断裂 %d", snap.TotalCacheBreaks))
 	}
+	b.WriteString(wrapStyledInline(line, width))
 
-	// Arbiter 按设计不参与 prompt cache（KB 级一次性裁定，无稳定前缀可复用），
-	// 常驻"未启用"或"0%"只会引人排查；用量面板仍完整记它的账。
-	var roles []host.AgentCacheStat
+	// Arbiter 按设计不参与 prompt cache（KB 级一次性裁定，无稳定前缀可复用）。
 	for _, a := range snap.CachePerAgent {
-		if a.Role != "arbiter" {
-			roles = append(roles, a)
+		if a.Role == "arbiter" {
+			continue
 		}
-	}
-	if len(roles) > 0 {
-		b.WriteString(lipgloss.NewStyle().Foreground(colorDim).
-			Render(strings.Repeat("·", max(8, width-12))))
+		b.WriteString(renderCacheAgentLine(a, width))
 		b.WriteString("\n")
-		for _, a := range roles {
-			b.WriteString(renderCacheAgentLine(a, width))
-			b.WriteString("\n")
-		}
 	}
 	return b.String()
 }
@@ -488,14 +618,16 @@ func colorPercent(p float64) string {
 //	已启用     "WRITER        85%  · 323k / 394k"
 //	无 cache  显式"未启用"，不混进 0/0 干扰判读
 func renderCacheAgentLine(a host.AgentCacheStat, width int) string {
-	// role 名与"运行角色"区保持完全一致；Width 取 12 让最长的 ARCHITECT
-	// 仍能保留 1 列尾随空格做分隔，其它 role 自动右侧填充。
-	roleStyle := lipgloss.NewStyle().Foreground(eventAgentColor(a.Role)).Width(12)
-	role := roleStyle.Render(agentDisplayName(a.Role))
+	// role 名与"角色"区保持一致；列宽随侧栏宽度取 8~10，窄栏下截断 ARCHITECT_LONG 尾部。
+	roleW := 10
+	if width < 28 {
+		roleW = 8
+	}
+	roleStyle := lipgloss.NewStyle().Foreground(eventAgentColor(a.Role)).Width(roleW)
+	role := roleStyle.Render(truncateWidth(sidebarAgentName(a.Role), roleW-1))
 
 	if !a.CacheCapable {
 		dim := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
-		_ = width
 		return role + dim.Render("未启用")
 	}
 
@@ -505,15 +637,13 @@ func renderCacheAgentLine(a host.AgentCacheStat, width int) string {
 		hit = cacheHitRate(a.CacheRead, a.Input)
 	}
 	// 百分比固定 4 列宽（"100%"），避免读量列在 "5%" 与 "85%" 之间左右跳。
-	pctCell := lipgloss.NewStyle().Width(4).
-		Render(colorPercent(hit))
+	pctCell := lipgloss.NewStyle().Width(4).Render(colorPercent(hit))
 
-	// 累计读 / 累计输入 — 即便上方百分比是滑动窗值，分子分母都用累计，因为
-	// "看出规模"才是这一列的主诉求；百分比单独提供稳态信号即可。
+	// 累计读/累计输入 — 分子分母都用累计，"看出规模"是这一列的主诉求；
+	// 百分比单独提供稳态信号。整行只有这一处用 "/"（数学除号），无空格以省列。
 	tokens := lipgloss.NewStyle().Foreground(colorDim).Render(
-		" · " + formatTokensCompact(a.CacheRead) + " / " + formatTokensCompact(a.Input))
-	_ = width
-	return role + pctCell + tokens
+		" " + formatTokensCompact(a.CacheRead) + "/" + formatTokensCompact(a.Input))
+	return fitInlineLine(role+pctCell+tokens, width)
 }
 
 // cacheHitRate 在 input 已含 cacheRead 的语义下直接除得百分比。

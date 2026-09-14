@@ -52,7 +52,8 @@ type Host struct {
 	budget          *BudgetSentinel     // 预算政策；未启用为 nil（方法 nil 安全）
 	gate            *ChapterAdvanceGate // 章节许可与一次性暂停的统一政策组件
 	notifier        *notify.Notifier    // 无人值守告警；未启用为 nil（Send nil 安全）
-	configPath      string              // 配置写盘目标：/config、/model 就近写当前生效的那份（项目级存在则写它，否则全局）
+	configPath      string              // 配置写盘目标：/channel、/model 就近写当前生效的那份（项目级存在则写它，否则全局）
+	launchDir       string              // 这本书的启动目录：项目级配置与规则都从它派生
 	logCleanup      func()
 	fileLogErr      error
 
@@ -198,10 +199,11 @@ func New(cfg bootstrap.Config, bundle assets.Bundle, options ...NewOption) (*Hos
 		models:          models,
 		thinkingApplier: applyThinking,
 		writerRestore:   restore,
-		userRules:       userrules.NewService(store, models.Default, rules.DefaultOptions()),
+		userRules:       userrules.NewService(store, models.Default, rules.DefaultOptionsIn(cfg.LaunchDir)),
 		usage:           usage,
 		usageCancel:     usageCancel,
-		configPath:      bootstrap.EffectiveConfigPath(),
+		configPath:      bootstrap.EffectiveConfigPathIn(cfg.LaunchDir),
+		launchDir:       cfg.LaunchDir,
 		logCleanup:      logCleanup,
 		fileLogErr:      fileLogErr,
 		events:          make(chan Event, 100),
@@ -302,7 +304,7 @@ func (h *Host) PrepareUserRules(rawPrompt string) error {
 	if err := h.refuseNewBookOverExisting(); err != nil {
 		return err
 	}
-	svc := userrules.NewService(h.store, h.models.Default, rules.DefaultOptions())
+	svc := userrules.NewService(h.store, h.models.Default, rules.DefaultOptionsIn(h.launchDir))
 	snap, err := svc.Build(context.Background(), rawPrompt)
 	if err != nil {
 		return fmt.Errorf("用户规则快照落盘失败，无法继续: %w", err)
@@ -314,7 +316,7 @@ func (h *Host) PrepareUserRules(rawPrompt string) error {
 // ensureUserRules 在恢复路径确保快照存在；缺失时按
 // system_defaults + rules 文件生成。
 func (h *Host) ensureUserRules() {
-	svc := userrules.NewService(h.store, h.models.Default, rules.DefaultOptions())
+	svc := userrules.NewService(h.store, h.models.Default, rules.DefaultOptionsIn(h.launchDir))
 	snap, err := svc.GetOrBuild(context.Background())
 	if err != nil {
 		slog.Warn("用户规则快照读取/生成失败，运行时将退到内置默认", "module", "rules", "err", err)
@@ -1373,6 +1375,8 @@ func (h *Host) SwitchModel(role, provider, model string) error {
 	if err := h.models.Swap(role, provider, model); err != nil {
 		return err
 	}
+	// 改动前先把旧选择记进它所属的渠道，切回那个渠道时才能还原成改动前的样子。
+	h.cfg.RememberChannelSelection()
 	if role == "" || role == "default" {
 		h.cfg.Provider = provider
 		h.cfg.ModelName = model
@@ -1385,6 +1389,8 @@ func (h *Host) SwitchModel(role, provider, model string) error {
 		rc.Model = model
 		h.cfg.Roles[role] = rc
 	}
+	// 新选择同样记进渠道记忆，供以后整体切回来时还原。
+	h.cfg.RememberChannelSelection()
 	// 换模型不改动已存的推理强度意图：只在下发时按新模型能力钳制。
 	if h.configPath != "" {
 		if err := bootstrap.SaveConfig(h.configPath, h.cfg); err != nil {
@@ -1498,6 +1504,99 @@ func (h *Host) SetRoleThinking(role, level string) error {
 		Time:     time.Now(),
 		Category: "SYSTEM",
 		Summary:  fmt.Sprintf("推理强度已切换：%s → %s", logRole, shown),
+		Level:    "info",
+	})
+	return nil
+}
+
+// RoleFallbacks 返回某角色已配置的备用渠道链（主模型失败时按序尝试）。
+// 默认档没有备用链：未显式覆盖的角色跑的是默认模型，备用要配在具体角色上。
+func (h *Host) RoleFallbacks(role string) []bootstrap.ModelRef {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	role = strings.ToLower(strings.TrimSpace(role))
+	if role == "" || role == "default" {
+		return nil
+	}
+	return append([]bootstrap.ModelRef(nil), h.cfg.Roles[role].Fallbacks...)
+}
+
+// SetRoleFallbacks 覆盖某角色的备用渠道链：校验 → 构建候选 ModelSet → 落盘 → 热应用。
+// 每个备用项是独立的 provider+model 组合，允许不同渠道挂不同模型。
+// 镜像 SwitchModel 的结构，但走 ConfigureModels 的“先建候选再提交”路径——备用渠道
+// 要真的能建出客户端才算配置成功，不能等到主模型失败那一刻才发现备用是坏的。
+func (h *Host) SetRoleFallbacks(role string, refs []bootstrap.ModelRef) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	role = strings.ToLower(strings.TrimSpace(role))
+	if role == "" || role == "default" {
+		return fmt.Errorf("默认模型不支持备用渠道，请在具体角色（architect/writer/editor）上配置")
+	}
+
+	normalized := make([]bootstrap.ModelRef, 0, len(refs))
+	seen := make(map[string]bool, len(refs))
+	for i, ref := range refs {
+		ref.Provider = strings.TrimSpace(ref.Provider)
+		ref.Model = strings.TrimSpace(ref.Model)
+		if ref.Provider == "" || ref.Model == "" {
+			return fmt.Errorf("备用渠道[%d] 必须同时指定 provider 和模型", i+1)
+		}
+		key := modelReferenceKey(ref.Provider, ref.Model)
+		if seen[key] {
+			return fmt.Errorf("备用渠道 %s/%s 重复", ref.Provider, ref.Model)
+		}
+		seen[key] = true
+		normalized = append(normalized, ref)
+	}
+
+	candidate := bootstrap.CloneConfig(h.cfg)
+	if candidate.Roles == nil {
+		candidate.Roles = make(map[string]bootstrap.RoleConfig)
+	}
+	rc := candidate.Roles[role]
+	// 备用链只在显式覆盖的角色上生效，所以先把当前生效的选择固化成主模型——
+	// 否则“给 writer 加备用渠道”会写出一条没有主模型的非法 role 配置。
+	if rc.Provider == "" || rc.Model == "" {
+		provider, model, _ := h.models.CurrentSelection(role)
+		rc.Provider, rc.Model = provider, model
+	}
+	if len(normalized) > 0 && rc.Provider == normalized[0].Provider && rc.Model == normalized[0].Model {
+		return fmt.Errorf("备用渠道[1] 与主模型相同（%s/%s）", rc.Provider, rc.Model)
+	}
+	rc.Fallbacks = normalized
+	candidate.Roles[role] = rc
+
+	if err := candidate.ValidateBase(); err != nil {
+		return err
+	}
+	prepared, err := bootstrap.NewModelSet(candidate)
+	if err != nil {
+		return fmt.Errorf("创建备用渠道客户端失败: %w", err)
+	}
+	if h.configPath == "" {
+		return fmt.Errorf("无法定位配置文件路径")
+	}
+	if err := bootstrap.SaveConfig(h.configPath, candidate); err != nil {
+		return fmt.Errorf("保存配置失败: %w", err)
+	}
+
+	h.models.ApplyPrepared(prepared)
+	h.cfg = candidate
+	h.applyThinkingLocked(role)
+
+	summary := fmt.Sprintf("备用渠道已更新：%s → 已清空", role)
+	if len(normalized) > 0 {
+		chain := make([]string, 0, len(normalized))
+		for _, ref := range normalized {
+			chain = append(chain, ref.Provider+"/"+ref.Model)
+		}
+		summary = fmt.Sprintf("备用渠道已更新：%s → %s", role, strings.Join(chain, " → "))
+	}
+	h.emitEvent(Event{
+		Time:     time.Now(),
+		Category: "SYSTEM",
+		Summary:  summary,
 		Level:    "info",
 	})
 	return nil

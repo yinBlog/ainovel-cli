@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 	"github.com/voocel/ainovel-cli/internal/host"
 )
 
@@ -21,10 +22,54 @@ func TestRenderTopBarShowsVersion(t *testing.T) {
 	}
 }
 
+func TestRenderTopBarUsesStatusPill(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(oldProfile) })
+
+	out := renderTopBar(host.UISnapshot{BookTitle: "测试小说", StatusLabel: "RUNNING", IsRunning: true}, 120, "⠋", "")
+	if !strings.Contains(ansi.Strip(out), "⠋ 运行中") {
+		t.Fatalf("顶栏缺少运行状态: %q", ansi.Strip(out))
+	}
+	if !strings.Contains(out, "48;2;") {
+		t.Fatalf("运行状态应使用彩色胶囊: %q", out)
+	}
+}
+
+func TestRenderTopBarMetaShowsCurrentAgent(t *testing.T) {
+	out := ansi.Strip(renderTopBar(host.UISnapshot{
+		BookTitle:         "测试小说",
+		Phase:             "writing",
+		Flow:              "writing",
+		InProgressChapter: 4,
+		Agents: []host.AgentSnapshot{{
+			Name: "writer", State: "running", TaskKind: "chapter_write", Tool: "draft_chapter",
+			Context: host.AgentContextSnapshot{Tokens: 10, ContextWindow: 100, Percent: 10},
+		}},
+	}, 120, "", ""))
+	for _, want := range []string{"阶段 写作", "第 4 章进行中", "当前 WRITER", "章节写作", "draft_chapter", "ctx 10%"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("顶栏上下文缺少 %q: %q", want, out)
+		}
+	}
+}
+
 func TestRenderDetailContentShowsSynopsis(t *testing.T) {
 	out := ansi.Strip(renderDetailContent(host.UISnapshot{Synopsis: "少年在永夜中寻找黎明。"}, 40))
 	if !strings.Contains(out, "简介") || !strings.Contains(out, "少年在永夜中寻找黎明。") {
 		t.Fatalf("detail panel missing synopsis: %q", out)
+	}
+}
+
+func TestRenderDetailContentShowsCurrentChapterPlan(t *testing.T) {
+	out := ansi.Strip(renderDetailContent(host.UISnapshot{
+		CurrentChapter: 2,
+		Outline:        []host.OutlineSnapshot{{Chapter: 2, Title: "门后的群星", CoreEvent: "主角发现旧设备仍在发送信号"}},
+	}, 40))
+	for _, want := range []string{"当前章 · 第 2 章", "门后的群星", "核心事件：主角发现旧设备仍在发送信号"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("当前章节计划缺少 %q: %q", want, out)
+		}
 	}
 }
 
@@ -37,6 +82,11 @@ func TestSameDetailSnapshotDetectsOutlineStateChanges(t *testing.T) {
 	changed.InProgressChapter = 1
 	if sameDetailSnapshot(base, changed) {
 		t.Fatal("章节状态变化必须触发详情重建")
+	}
+	changed = base
+	changed.CurrentChapter = 2
+	if sameDetailSnapshot(base, changed) {
+		t.Fatal("当前章节变化必须触发详情重建")
 	}
 }
 
@@ -85,6 +135,21 @@ func TestRenderStatusBarAutoThinkingAndEmpty(t *testing.T) {
 	}
 	if out := ansi.Strip(renderStatusBar(host.UISnapshot{}, "", 120)); out != "READY" {
 		t.Fatalf("空快照应回退 READY，得 %q", out)
+	}
+}
+
+func TestRenderShortcutHintsStylesKeysWithoutChangingText(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(oldProfile) })
+
+	want := "/ 命令 · Tab 切面板 · ↑↓ 滚动 · Enter 发送"
+	got := renderShortcutHints(want, 120)
+	if plain := ansi.Strip(got); plain != want {
+		t.Fatalf("快捷键样式改变了文案: got %q want %q", plain, want)
+	}
+	if got == want {
+		t.Fatal("快捷键提示应包含 ANSI 样式")
 	}
 }
 

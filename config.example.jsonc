@@ -99,7 +99,10 @@
 
   // 可选。按角色覆盖默认模型；未配的角色使用上面的 model。
   // reasoning_effort 也可按角色覆盖；未配时继承顶层 reasoning_effort。
-  // 角色：architect / writer / editor。fallbacks 在主模型失败时按序尝试。
+  // 角色：architect / writer / editor。fallbacks 是备用渠道链：主模型本次请求失败
+  // 且错误可降级时，按序换渠道重试一次；每项是独立的 provider+model，不同渠道可挂
+  // 不同模型。只对显式配了主模型的角色生效（默认档没有角色级备用链）。
+  // 运行时用 /model 面板的「备用渠道」行编辑，改动即时生效。
   // 注意：这里的 provider 同样是“指针”，必须指向 providers 里存在的 key。
   // "roles": {
   //   "writer": {
@@ -109,6 +112,14 @@
   //     "fallbacks": [{ "provider": "openrouter", "model": "google/gemini-3.0-pro" }]
   //   },
   //   "architect": { "provider": "openrouter", "model": "google/gemini-3.1-pro" }
+  // },
+
+  // 由 /channel 自动维护，一般不用手写：记录每个渠道上各角色分别用过哪个模型。
+  // /channel 整体切渠道时靠它还原“上次在这个渠道上是怎么配的”；查不到或模型已被删
+  // 就退化到同名模型、再退化到该渠道的第一个模型。纯选择记忆，不影响运行时行为。
+  // "channel_presets": {
+  //   "openrouter": { "default": "google/gemini-3.0-flash", "writer": "google/gemini-3.1-pro" },
+  //   "codex-proxy": { "default": "gpt-5.4", "writer": "MiniMax-M3" }
   // },
 
   // 写作风格：default / suspense / fantasy / romance。

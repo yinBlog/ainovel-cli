@@ -75,7 +75,7 @@ func TestConfigureModelsRejectsDeletingReferencedModel(t *testing.T) {
 	}
 }
 
-// /config 不再代切默认：删掉顶层正在用的模型必须被拒，让用户先去 /model 切走。
+// 渠道面板不代切默认：删掉顶层正在用的模型必须被拒，让用户先去 /model 切走。
 func TestConfigureModelsRejectsDeletingCurrentModel(t *testing.T) {
 	h, _ := newModelConfigTestHost(t)
 	err := h.ConfigureModels(ModelConfigurationDraft{
@@ -291,5 +291,84 @@ func TestConfigureModelsSuggestsSwitchForNewProvider(t *testing.T) {
 	event := <-h.events
 	if !strings.Contains(event.Summary, "使用 /model 切换") {
 		t.Fatalf("新增非当前 Provider 后应提示切换，event=%q", event.Summary)
+	}
+}
+
+// 备用链只在显式覆盖的角色上生效，所以给一个没配过的角色加备用渠道时，
+// 必须先把它当前跑的模型固化成主模型，否则会写出一条没有主模型的非法 role。
+func TestSetRoleFallbacksMaterializesPrimary(t *testing.T) {
+	h, path := newModelConfigTestHost(t)
+	if _, ok := h.cfg.Roles["editor"]; ok {
+		t.Fatal("测试前置：editor 不应有角色覆盖")
+	}
+	refs := []bootstrap.ModelRef{{Provider: "proxy", Model: "writer-model"}}
+	if err := h.SetRoleFallbacks("editor", refs); err != nil {
+		t.Fatalf("set fallbacks: %v", err)
+	}
+	rc := h.cfg.Roles["editor"]
+	if rc.Provider != "proxy" || rc.Model != "old" {
+		t.Fatalf("主模型应固化成当前默认 proxy/old，得到 %s/%s", rc.Provider, rc.Model)
+	}
+	if len(rc.Fallbacks) != 1 || rc.Fallbacks[0] != refs[0] {
+		t.Fatalf("备用链 = %+v", rc.Fallbacks)
+	}
+	// 必须落盘：重启后备用链还在才算配置成功。
+	saved, err := bootstrap.LoadConfigFile(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := saved.Roles["editor"].Fallbacks; len(got) != 1 || got[0] != refs[0] {
+		t.Fatalf("落盘的备用链 = %+v", got)
+	}
+}
+
+func TestSetRoleFallbacksRejectsInvalidInput(t *testing.T) {
+	cases := []struct {
+		name string
+		role string
+		refs []bootstrap.ModelRef
+		want string
+	}{
+		{"默认档没有角色级备用链", "default", []bootstrap.ModelRef{{Provider: "proxy", Model: "old"}}, "默认模型"},
+		{"重复条目", "writer", []bootstrap.ModelRef{
+			{Provider: "proxy", Model: "old"}, {Provider: "proxy", Model: "old"},
+		}, "重复"},
+		{"缺模型名", "writer", []bootstrap.ModelRef{{Provider: "proxy"}}, "provider 和模型"},
+		{"未配置的 provider", "writer", []bootstrap.ModelRef{{Provider: "ghost", Model: "x"}}, "ghost"},
+		{"第一顺位与主模型相同", "writer", []bootstrap.ModelRef{{Provider: "proxy", Model: "writer-model"}}, "与主模型相同"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := newModelConfigTestHost(t)
+			before := h.cfg.Roles["writer"].Fallbacks
+			err := h.SetRoleFallbacks(tc.role, tc.refs)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("期望包含 %q 的错误，得到 %v", tc.want, err)
+			}
+			if got := h.cfg.Roles["writer"].Fallbacks; len(got) != len(before) {
+				t.Fatalf("失败后不应改动运行时配置：%+v", got)
+			}
+		})
+	}
+}
+
+// 清空备用链是合法操作，且要落盘。
+func TestSetRoleFallbacksClears(t *testing.T) {
+	h, path := newModelConfigTestHost(t)
+	if err := h.SetRoleFallbacks("writer", nil); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if got := h.cfg.Roles["writer"].Fallbacks; len(got) != 0 {
+		t.Fatalf("清空后 = %+v", got)
+	}
+	saved, err := bootstrap.LoadConfigFile(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := saved.Roles["writer"].Fallbacks; len(got) != 0 {
+		t.Fatalf("落盘后 = %+v", got)
+	}
+	if saved.Roles["writer"].Model != "writer-model" {
+		t.Fatalf("清空备用链不应动主模型：%q", saved.Roles["writer"].Model)
 	}
 }

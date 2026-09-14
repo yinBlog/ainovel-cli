@@ -93,8 +93,14 @@ func ensureRulesDirAt(dir string) error {
 // 放 ~/.ainovel/rules/ 全局目录即可（其下所有 .md 都会被加载）。
 func DefaultOptions() LoadOptions {
 	cwd, _ := os.Getwd()
+	return DefaultOptionsIn(cwd)
+}
+
+// DefaultOptionsIn 是 DefaultOptions 的按书版本：切书后项目规则要跟着新书的启动目录走。
+// projectDir 为空时只保留全局规则来源。
+func DefaultOptionsIn(projectDir string) LoadOptions {
 	return LoadOptions{
 		HomeRulesDir:    DefaultHomeRulesDir(),
-		ProjectRulesDir: DefaultProjectRulesDir(cwd),
+		ProjectRulesDir: DefaultProjectRulesDir(projectDir),
 	}
 }

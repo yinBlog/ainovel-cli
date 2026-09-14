@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -196,10 +197,38 @@ var knownRoles = map[string]bool{
 	"import_synthesize": true,
 }
 
+// DefaultSlot 是“默认档”在角色槽位里的名字。整体切渠道时它和具体角色一样被搬运，
+// 但它不是 knownRoles 成员——配置里对应顶层 provider/model，不是 roles 里的条目。
+const DefaultSlot = "default"
+
+// ChannelPreset 记录某个渠道上各角色槽位分别用哪个模型：slot -> model。
+// slot 取 DefaultSlot 或 knownRoles 里的角色名。
+//
+// 它是**选择记忆**而不是事实来源：第三方中转很多、模型名各不相同，整体切渠道时
+// 靠它还原“上次在这个渠道上是怎么配的”。查不到或模型已被删就退化到同名/首个，
+// 所以这里的内容永远只是提示，不参与任何校验，也不影响运行时行为。
+type ChannelPreset map[string]string
+
+func (p ChannelPreset) clone() ChannelPreset {
+	if len(p) == 0 {
+		return nil
+	}
+	out := make(ChannelPreset, len(p))
+	for slot, model := range p {
+		out[slot] = model
+	}
+	return out
+}
+
 // Config 小说应用配置。
 type Config struct {
 	// 运行时字段（不序列化到 JSON）
 	OutputDir string `json:"-"` // 输出根目录
+	// LaunchDir 是这本书的启动目录：per-book 的 ./.ainovel/config.json、
+	// ./.ainovel/rules/ 与 ./output/novel 都从它派生。空 = 当前工作目录。
+	// 一个进程同一时刻只服务一本书；切书时整份配置按新的 LaunchDir 重新加载，
+	// 而不是就地改路径——per-book 覆盖必须跟着新书走。
+	LaunchDir string `json:"-"`
 
 	// 默认 LLM 配置
 	Provider  string `json:"provider"` // 默认 provider（Providers map 中的 key）
@@ -213,6 +242,10 @@ type Config struct {
 
 	// 角色级模型覆盖
 	Roles map[string]RoleConfig `json:"roles,omitempty"`
+
+	// ChannelPresets 记录每个渠道上各角色用过的模型，供整体切渠道时还原。
+	// 纯选择记忆，不是事实来源——查不到就退化到同名/首个模型。
+	ChannelPresets map[string]ChannelPreset `json:"channel_presets,omitempty"`
 
 	// 创作参数
 	Style string `json:"style,omitempty"`
@@ -415,8 +448,13 @@ func (c *Config) DefaultProviderConfig() ProviderConfig {
 
 // FillDefaults 填充默认值。
 func (c *Config) FillDefaults() {
+	if c.LaunchDir == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			c.LaunchDir = cwd
+		}
+	}
 	if c.OutputDir == "" {
-		c.OutputDir = filepath.Join("output", "novel")
+		c.OutputDir = filepath.Join(c.LaunchDir, "output", "novel")
 	}
 	if c.Providers == nil {
 		c.Providers = make(map[string]ProviderConfig)

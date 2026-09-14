@@ -435,13 +435,22 @@ func TestConnectionTestCanBeCancelled(t *testing.T) {
 	}
 }
 
-func TestConfigCommandIsRegistered(t *testing.T) {
-	spec, ok := commandRegistryInstance().Find("config")
+// 渠道的定义和整体切换合成了一个面板：/channel 是正名，/config 保留为别名，
+// 两者必须指向同一条命令。
+func TestChannelCommandIsRegistered(t *testing.T) {
+	spec, ok := commandRegistryInstance().Find("channel")
 	if !ok {
-		t.Fatal("/config is not registered")
+		t.Fatal("/channel is not registered")
 	}
-	if spec.Usage != "/config" || !spec.AutoExecute {
-		t.Fatalf("config spec = %#v", spec)
+	if spec.Usage != "/channel" || !spec.AutoExecute {
+		t.Fatalf("channel spec = %#v", spec)
+	}
+	alias, ok := commandRegistryInstance().Find("config")
+	if !ok {
+		t.Fatal("/config 别名丢了：老用户的肌肉记忆不能断")
+	}
+	if alias.Name != spec.Name {
+		t.Fatalf("/config 指向了 %q，应与 /channel 同一条命令", alias.Name)
 	}
 }
 
@@ -452,7 +461,7 @@ func TestModelSwitchLabelIncludesContextWindow(t *testing.T) {
 	}
 }
 
-// 与 /model 一致：/config 渲染成内容高度的带框浮层（不再撑成 3/4 屏的居中蒙层）。
+// 与 /model 一致：渠道面板渲染成内容高度的带框浮层（不再撑成 3/4 屏的居中蒙层）。
 func TestModelConfigModalIsCompactOverlay(t *testing.T) {
 	state := &modelConfigState{step: configStepProvider, providerChoices: []configProviderChoice{
 		{label: "编辑 openrouter", existing: &host.ProviderSnapshot{Name: "openrouter"}},
@@ -464,8 +473,8 @@ func TestModelConfigModalIsCompactOverlay(t *testing.T) {
 	if len(lines) != 5 {
 		t.Fatalf("紧凑浮层应为 5 行（内容高度），得到 %d 行:\n%s", len(lines), strings.Join(lines, "\n"))
 	}
-	if !strings.Contains(lines[0], "┌") || !strings.Contains(lines[0], "/config") {
-		t.Fatalf("首行应是带 /config 标题的上边框，得到 %q", lines[0])
+	if !strings.Contains(lines[0], "┌") || !strings.Contains(lines[0], "/channel") {
+		t.Fatalf("首行应是带 /channel 标题的上边框，得到 %q", lines[0])
 	}
 	if !strings.Contains(lines[len(lines)-1], "└") {
 		t.Fatalf("末行应是下边框，得到 %q", lines[len(lines)-1])

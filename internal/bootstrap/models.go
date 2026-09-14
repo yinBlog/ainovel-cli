@@ -145,21 +145,10 @@ func (ms *ModelSet) ForRole(role string) agentcore.ChatModel {
 }
 
 // ForRoleWithFailover 返回带有单次请求级 fallback 的角色模型。
-// 仅当该角色显式配置了 fallbacks 时生效；未配置时退化为普通模型。
+// 主模型与备用链都在每次请求时从 ModelSet 现读：运行时 /model 给某角色加备用渠道
+// （或第一次给它配显式主模型）无需重启即可生效。没有备用渠道时行为与普通模型一致。
 func (ms *ModelSet) ForRoleWithFailover(role string, report FailoverReporter) agentcore.ChatModel {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-	primary, ok := ms.models[role]
-	if !ok {
-		return ms.Default
-	}
-	targets := ms.fallbacks[role]
-	if len(targets) == 0 {
-		return primary
-	}
-	return &failoverModel{
-		role: role, primary: primary, set: ms, report: report,
-	}
+	return &failoverModel{role: role, set: ms, report: report}
 }
 
 // Summary 返回模型分配摘要（供日志使用）。
@@ -395,14 +384,30 @@ func createModelFromConfig(providerKey, model string, pc ProviderConfig, cache m
 }
 
 type failoverModel struct {
-	role    string
-	primary *SwappableModel
-	set     *ModelSet
-	report  FailoverReporter
+	role   string
+	set    *ModelSet
+	report FailoverReporter
+}
+
+// primaryModel 现读该角色当前的主模型：有显式覆盖走覆盖，否则走默认模型。
+// 不缓存指针——角色的显式覆盖可能在运行时才被 /model 建出来。
+func (m *failoverModel) primaryModel() *SwappableModel {
+	if m.set == nil {
+		return nil
+	}
+	m.set.mu.RLock()
+	defer m.set.mu.RUnlock()
+	if sw, ok := m.set.models[m.role]; ok {
+		return sw
+	}
+	return m.set.Default
 }
 
 func (m *failoverModel) Generate(ctx context.Context, messages []agentcore.Message, tools []agentcore.ToolSpec, opts ...agentcore.CallOption) (*agentcore.LLMResponse, error) {
 	current := m.currentTarget()
+	if current.model == nil {
+		return nil, fmt.Errorf("role %q: no model configured: %w", m.role, errs.ErrConfig)
+	}
 	resp, err := current.model.Generate(ctx, messages, tools, opts...)
 	if err == nil {
 		return resp, nil
@@ -476,21 +481,33 @@ func (m *failoverModel) GenerateStream(ctx context.Context, messages []agentcore
 }
 
 func (m *failoverModel) SupportsTools() bool {
-	return m.primary != nil && m.primary.SupportsTools()
+	primary := m.primaryModel()
+	return primary != nil && primary.SupportsTools()
 }
 
 func (m *failoverModel) ProviderName() string {
-	if m.primary == nil {
+	primary := m.primaryModel()
+	if primary == nil {
 		return ""
 	}
-	return m.primary.ProviderName()
+	return primary.ProviderName()
+}
+
+// ModelName 满足 agentcore.ModelNamer：包装层不能吞掉主模型的身份。
+func (m *failoverModel) ModelName() string {
+	primary := m.primaryModel()
+	if primary == nil {
+		return ""
+	}
+	return primary.ModelName()
 }
 
 func (m *failoverModel) Info() llm.ModelInfo {
-	if m.primary == nil {
+	primary := m.primaryModel()
+	if primary == nil {
 		return llm.ModelInfo{}
 	}
-	return m.primary.Info()
+	return primary.Info()
 }
 
 func (m *failoverModel) Capabilities() llm.Capabilities {
@@ -502,22 +519,24 @@ func (m *failoverModel) JSONSchemaOverride() *bool {
 }
 
 func (m *failoverModel) StructuredOutputFacts() llmcontract.ModelFacts {
-	if m.primary == nil {
+	primary := m.primaryModel()
+	if primary == nil {
 		return llmcontract.ModelFacts{}
 	}
-	return m.primary.StructuredOutputFacts()
+	return primary.StructuredOutputFacts()
 }
 
 func (m *failoverModel) currentTarget() modelTarget {
-	if m.primary == nil {
+	primary := m.primaryModel()
+	if primary == nil {
 		return modelTarget{}
 	}
-	provider, name := m.primary.Current()
+	provider, name := primary.Current()
 	return modelTarget{
 		provider:   provider,
 		name:       name,
-		model:      m.primary,
-		jsonSchema: m.primary.JSONSchemaOverride(),
+		model:      primary,
+		jsonSchema: primary.JSONSchemaOverride(),
 	}
 }
 

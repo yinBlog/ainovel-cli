@@ -59,15 +59,17 @@ func (s *reportState) setContent(contentW int) {
 	}
 }
 
+// reportModalSize 是全部只读面板（诊断 / 帮助 / 书架 / 导入 / 仿写）的公共尺寸：
+// 宽占终端 92%（上限 140 列），高占 92%——面板承载的是表格与正文，留白越少越好。
 func reportModalSize(termW, termH int) (int, int) {
-	w := termW * 80 / 100
-	if w > 100 {
-		w = 100
+	w := termW * 92 / 100
+	if w > 140 {
+		w = 140
 	}
 	if w < 60 {
 		w = termW - 4
 	}
-	h := termH * 85 / 100
+	h := termH * 92 / 100
 	if h < 20 {
 		h = termH - 2
 	}
@@ -256,15 +258,15 @@ func renderFinding(b *strings.Builder, f diag.Finding, width int) {
 	}
 	b.WriteString("\n")
 
+	// 证据和建议都折行，且续行要跟着缩进。先写两个空格再 wrapText 只能缩进首行，
+	// 后面几行会顶到最左，整块看起来像断了。
 	if f.Evidence != "" {
 		b.WriteString("  ")
-		b.WriteString(evidenceStyle.Render(wrapText(f.Evidence, width-4)))
-		b.WriteString("\n")
+		writeIndented(b, f.Evidence, width, 2, evidenceStyle)
 	}
 	if f.Suggestion != "" {
 		b.WriteString("  ")
-		b.WriteString(suggestionStyle.Render("-> " + wrapText(f.Suggestion, width-7)))
-		b.WriteString("\n")
+		writeIndented(b, "-> "+f.Suggestion, width, 5, suggestionStyle)
 	}
 }
 

@@ -19,8 +19,13 @@ import (
 
 // 消息类型
 type (
-	eventMsg       host.Event
-	snapshotMsg    host.UISnapshot
+	eventMsg host.Event
+	// snapshotMsg 带上它来自哪个 Host：切书后旧 Host 的定时快照还在路上，
+	// 不认来源就会把上一本书的进度画到新书上。
+	snapshotMsg struct {
+		rt   *host.Host
+		snap host.UISnapshot
+	}
 	doneMsg        struct{ complete bool } // complete=true 全书完成，false 出错停止
 	abortResultMsg struct{ stopped bool }
 	bootstrapMsg   struct {
@@ -140,13 +145,13 @@ func listenDone(rt *host.Host) tea.Cmd {
 
 func tickSnapshot(rt *host.Host) tea.Cmd {
 	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
-		return snapshotMsg(rt.Snapshot())
+		return snapshotMsg{rt: rt, snap: rt.Snapshot()}
 	})
 }
 
 func fetchSnapshot(rt *host.Host) tea.Cmd {
 	return func() tea.Msg {
-		return snapshotMsg(rt.Snapshot())
+		return snapshotMsg{rt: rt, snap: rt.Snapshot()}
 	}
 }
 

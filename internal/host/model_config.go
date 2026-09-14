@@ -19,16 +19,26 @@ const (
 	APIKeyClear   APIKeyAction = "clear"
 )
 
-// ProviderSnapshot 是供 TUI 使用的脱敏 provider 配置。
+// ProviderSnapshot 是供 TUI 使用的脱敏渠道配置：既描述这个渠道是什么（协议/凭证/
+// 模型库），也描述它当前被谁在用（默认档、几个角色）。渠道面板既要编辑定义也要
+// 整体切换，两边看的是同一张表，所以不再分成两个快照类型。
 type ProviderSnapshot struct {
-	Name           string
-	Type           string
-	API            string
-	BaseURL        string
-	Models         []bootstrap.ModelConfig
+	Name    string
+	Type    string // 配置里原样的 type（可能为空，hub 要写回它）
+	API     string
+	BaseURL string
+	Models  []bootstrap.ModelConfig
+
 	HasAPIKey      bool
 	APIKeyHint     string
 	RequiresAPIKey bool
+
+	// Protocol 是解析后的协议名，仅供展示：省略 type 的已知 provider 用自己的名字，
+	// 自定义代理漏写 type 是真实配置错误，列表里就该看得见。
+	Protocol   string
+	ModelCount int
+	SlotCount  int  // 当前有几个角色槽位跑在这个渠道上
+	IsDefault  bool // 默认档是否在这个渠道上
 }
 
 type ModelConfigurationSnapshot struct {
@@ -91,13 +101,28 @@ func (h *Host) ModelConfiguration() ModelConfigurationSnapshot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	onChannel := make(map[string]int, len(h.cfg.Providers))
+	for _, slot := range h.cfg.ActiveSlots() {
+		provider, _ := h.cfg.SlotSelection(slot)
+		onChannel[provider]++
+	}
+
 	providers := make([]ProviderSnapshot, 0, len(h.cfg.Providers))
 	for name, pc := range h.cfg.Providers {
+		protocol, err := pc.ProviderType(name)
+		if err != nil {
+			protocol = "缺 type"
+		}
+		models := modelConfigurations(h.cfg, name, pc)
 		providers = append(providers, ProviderSnapshot{
 			Name: name, Type: pc.Type, API: pc.API, BaseURL: pc.BaseURL,
-			Models:    modelConfigurations(h.cfg, name, pc),
+			Models:    models,
 			HasAPIKey: pc.APIKey != "", APIKeyHint: MaskAPIKey(pc.APIKey),
 			RequiresAPIKey: pc.RequiresAPIKey(name),
+			Protocol:       protocol,
+			ModelCount:     len(models),
+			SlotCount:      onChannel[name],
+			IsDefault:      h.cfg.Provider == name,
 		})
 	}
 	sort.Slice(providers, func(i, j int) bool { return providers[i].Name < providers[j].Name })
@@ -236,7 +261,7 @@ func (h *Host) ConfigureModels(draft ModelConfigurationDraft) error {
 		newNames[model.Name] = true
 	}
 	// 删除模型前先查引用：被顶层默认或任何角色/fallback 指向的模型不能删，
-	// 让用户先去 /model 切走——/config 不再代切默认。
+	// 让用户先去 /model 切走——渠道面板不代切默认。
 	for _, old := range preparedDraft.oldModels {
 		if newNames[old.Name] {
 			continue

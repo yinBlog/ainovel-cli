@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/voocel/agentcore"
+	"github.com/voocel/ainovel-cli/internal/bootstrap"
 	"github.com/voocel/ainovel-cli/internal/host"
 )
 
@@ -18,6 +19,8 @@ type modelRuntime interface {
 	CurrentThinking(role string) string
 	SwitchModel(role, provider, model string) error
 	SetRoleThinking(role, level string) error
+	RoleFallbacks(role string) []bootstrap.ModelRef
+	SetRoleFallbacks(role string, refs []bootstrap.ModelRef) error
 }
 
 type modelSwitchFocus int
@@ -27,6 +30,7 @@ const (
 	modelFocusProvider
 	modelFocusModel
 	modelFocusThinking
+	modelFocusFallback
 )
 
 type modelRoleOption struct {
@@ -98,6 +102,14 @@ type modelSwitchState struct {
 	// 该字段才回写——存储的强度意图可能高于当前模型能力、面板无法呈现，不能因“没动”而误抹。
 	initialThinkingKey string
 	message            string
+
+	// 备用渠道子编辑器：fallbacks 是草稿，Enter 应用时才与 initialFallbacks 比对回写。
+	// 每项是独立的 provider+model，允许不同渠道挂不同模型。
+	fallbackEditing  bool
+	fallbacks        []bootstrap.ModelRef
+	initialFallbacks []bootstrap.ModelRef
+	fbCursor         int // 0..len(fallbacks)，末行是“＋ 添加备用渠道”
+	fbColumn         int // 0=Provider，1=模型
 }
 
 func newModelSwitchState(rt modelRuntime, roleHint string) *modelSwitchState {
@@ -178,7 +190,7 @@ func (s *modelSwitchState) thinkingLabel() string {
 }
 
 func (s *modelSwitchState) moveFocus(delta int) {
-	total := 4
+	total := 5
 	s.focus = modelSwitchFocus((int(s.focus) + delta + total) % total)
 }
 
@@ -223,6 +235,7 @@ func (s *modelSwitchState) syncSelection(rt modelRuntime) {
 	}
 	s.syncModels(rt, model)
 	s.syncThinking(rt)
+	s.syncFallbacks(rt)
 	s.message = ""
 }
 
@@ -265,6 +278,14 @@ func (s *modelSwitchState) apply(rt modelRuntime) error {
 			return err
 		}
 	}
+	// 备用渠道同样只在草稿真的变过时回写：一次回写会重建整套模型客户端并落盘。
+	// 必须排在 SwitchModel 之后——它先把当前选择固化成该角色的主模型。
+	if s.supportsFallbacks() && !sameFallbacks(s.fallbacks, s.initialFallbacks) {
+		if err := rt.SetRoleFallbacks(s.role(), s.fallbacks); err != nil {
+			return err
+		}
+		s.initialFallbacks = append([]bootstrap.ModelRef(nil), s.fallbacks...)
+	}
 	s.syncThinking(rt)
 	return nil
 }
@@ -274,6 +295,10 @@ func (m Model) handleModelSwitchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	state := m.modelSwitch
+	if state.fallbackEditing {
+		state.handleFallbackKey(msg, m.runtime)
+		return m, nil
+	}
 
 	switch msg.Type {
 	case tea.KeyEsc:
@@ -292,6 +317,15 @@ func (m Model) handleModelSwitchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		state.cycle(1, m.runtime)
 		return m, nil
 	case tea.KeyEnter:
+		if state.focus == modelFocusFallback {
+			if !state.supportsFallbacks() {
+				state.message = "默认档不支持备用渠道，请切到 Architect/Writer/Editor"
+				return m, nil
+			}
+			state.fallbackEditing = true
+			state.message = ""
+			return m, nil
+		}
 		if err := state.apply(m.runtime); err != nil {
 			state.message = err.Error()
 			return m, nil
@@ -308,65 +342,41 @@ func renderModelSwitchBar(width int, state *modelSwitchState) string {
 		return ""
 	}
 
+	titleText := "/model 切换模型"
+	if state.fallbackEditing {
+		titleText = "/model · " + state.roleLabel() + " 备用渠道"
+	}
 	title := lipgloss.NewStyle().
 		Foreground(colorMuted).
 		Bold(true).
-		Render("/model 切换模型")
+		Render(titleText)
 
-	row1 := renderModelField("角色", state.roleLabel(), state.focus == modelFocusRole)
-	row2 := renderModelField("Provider", state.provider(), state.focus == modelFocusProvider)
-	row3 := renderModelField("模型", state.modelLabel(), state.focus == modelFocusModel)
-	row4 := renderModelField("推理强度", state.thinkingLabel(), state.focus == modelFocusThinking)
-	hint := lipgloss.NewStyle().
-		Foreground(colorDim).
-		Italic(true).
-		Render("Tab 切字段   ←→ 切选项   Enter 应用   Esc 取消")
-	lines := []string{
-		row1,
-		row2,
-		row3,
-		row4,
-		hint,
+	var lines []string
+	if state.fallbackEditing {
+		lines = fallbackPanelLines(state)
+	} else {
+		hintText := "Tab 切字段   ←→ 切选项   Enter 应用   Esc 取消"
+		switch state.focus {
+		case modelFocusProvider:
+			// 这里换渠道只动当前角色；整本书一起搬归 /channel。
+			hintText = "←→ 换渠道（仅本角色）   整体切换用 /channel"
+		case modelFocusFallback:
+			hintText = "Tab 切字段   Enter 编辑备用渠道   Esc 取消"
+		}
+		lines = []string{
+			renderModelField("角色", state.roleLabel(), state.focus == modelFocusRole),
+			renderModelField("Provider", state.provider(), state.focus == modelFocusProvider),
+			renderModelField("模型", state.modelLabel(), state.focus == modelFocusModel),
+			renderModelField("推理强度", state.thinkingLabel(), state.focus == modelFocusThinking),
+			renderModelField("备用渠道", state.fallbackSummary(), state.focus == modelFocusFallback),
+			lipgloss.NewStyle().Foreground(colorDim).Italic(true).Render(hintText),
+		}
 	}
 	if state.message != "" {
 		lines = append(lines, lipgloss.NewStyle().Foreground(colorError).Italic(true).Render(truncate(state.message, width-8)))
 	}
 
-	content := strings.Join(lines, "\n")
-	boxW := lipgloss.Width(content) + 8
-	maxW := width - 2
-	if maxW > 68 {
-		maxW = 68
-	}
-	if boxW > maxW {
-		boxW = maxW
-	}
-	if boxW < 56 {
-		boxW = 56
-	}
-
-	innerW := boxW - 2
-	if innerW < 16 {
-		innerW = 16
-	}
-	sepW := innerW - lipgloss.Width(title) - 3
-	if sepW < 0 {
-		sepW = 0
-	}
-	lineStyle := lipgloss.NewStyle().Foreground(colorDim)
-	topBorder := lineStyle.Render("┌─ ") + title + lineStyle.Render(" "+strings.Repeat("─", sepW)+"┐")
-	bottomBorder := lineStyle.Render("└" + strings.Repeat("─", innerW) + "┘")
-
-	body := make([]string, 0, len(lines))
-	for _, line := range lines {
-		padding := innerW - lipgloss.Width(line)
-		if padding < 0 {
-			padding = 0
-		}
-		body = append(body, lineStyle.Render("│")+line+strings.Repeat(" ", padding)+lineStyle.Render("│"))
-	}
-
-	return strings.Join(append(append([]string{topBorder}, body...), bottomBorder), "\n")
+	return renderCommandBox(title, lines, width, 56, 68)
 }
 
 func renderModelField(label, value string, focused bool) string {

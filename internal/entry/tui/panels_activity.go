@@ -33,12 +33,13 @@ func runningSpinner(frame int) string {
 }
 
 func renderEventLine(ev host.Event, width, spinnerFrame int) string {
-	tsStr := lipgloss.NewStyle().Foreground(colorDim).Render(ev.Time.Format("15:04:05"))
+	// 时间戳只到分钟：长篇一跑就是几小时，秒级精度没有决策价值，每行省 3 列给摘要。
+	tsStr := lipgloss.NewStyle().Foreground(colorDim).Render(ev.Time.Format("15:04"))
 	indent := ""
 	if ev.Depth > 0 {
 		indent = "  "
 	}
-	maxSumW := max(20, width-12-ev.Depth*2)
+	maxSumW := max(20, width-9-ev.Depth*2)
 
 	running := ev.Running()
 	durStr := renderEventDuration(ev.Duration)
@@ -228,13 +229,6 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%ds", m, s)
 }
 
-func renderEventActivity(snap host.UISnapshot, frame, width int) string {
-	if !snap.IsRunning {
-		return ""
-	}
-	return renderEventSparkle(frame, width)
-}
-
 var sparkleFrames = []string{
 	"✦  ·   ✧   ·  ✦",
 	"·  ✧   ·  ✦   ·",
@@ -267,19 +261,15 @@ func renderEventSparkle(frame, width int) string {
 }
 
 // renderEventFlowViewport 用 viewport 包装渲染事件流面板。
-func renderEventFlowViewport(vp viewport.Model, width, height int, focused bool) string {
-	// 标题栏
-	titleColor := colorDim
-	if focused {
-		titleColor = colorAccent
+func renderEventFlowViewport(vp viewport.Model, width, height int, focused, following bool, eventCount, runningCount int) string {
+	meta := []string{followStateLabel(following)}
+	if eventCount > 0 {
+		meta = append(meta, fmt.Sprintf("%d 条", eventCount))
 	}
-	title := lipgloss.NewStyle().Foreground(titleColor).Render(":: 事件流")
-	lineW := width - lipgloss.Width(title) - 4
-	if lineW < 0 {
-		lineW = 0
+	if runningCount > 0 {
+		meta = append(meta, fmt.Sprintf("%d 进行中", runningCount))
 	}
-	separator := lipgloss.NewStyle().Foreground(colorDim).Render(strings.Repeat("─", lineW))
-	header := " " + title + " " + separator
+	header := renderActivityHeader("事件流", strings.Join(meta, " · "), width, focused, false)
 
 	vpH := height - 1
 	if vpH < 1 {
@@ -294,21 +284,16 @@ func renderEventFlowViewport(vp viewport.Model, width, height int, focused bool)
 }
 
 // renderStreamPanel 渲染流式输出面板（中间列下半部分）。
-func renderStreamPanel(vp viewport.Model, width, height int, focused, running bool, frame int) string {
-	// 分隔标题栏（始终醒目）：粗竖条前缀 + 永远 Bold + 强调色，避免与思考的淡灰斜体撞色
-	// focused 时额外下划线，区分焦点态。
-	titleStyle := lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Underline(focused)
-	title := titleStyle.Render("▍实时输出")
+func renderStreamPanel(vp viewport.Model, width, height int, focused, running, following bool, round, frame int) string {
+	var meta []string
 	if running {
-		status := renderStreamActivity(frame)
-		title += " " + status
+		meta = append(meta, renderStreamActivity(frame))
 	}
-	lineW := width - lipgloss.Width(title) - 4
-	if lineW < 0 {
-		lineW = 0
+	meta = append(meta, followStateLabel(following))
+	if round > 0 {
+		meta = append(meta, fmt.Sprintf("第 %d 轮", round))
 	}
-	separator := lipgloss.NewStyle().Foreground(colorDim).Render(strings.Repeat("─", lineW))
-	header := " " + title + " " + separator
+	header := renderActivityHeader("实时输出", strings.Join(meta, " · "), width, focused, running)
 
 	// viewport 内容（height 包含 header 行，viewport 实际高度需减 1）。
 	// 外层 vpStyle 不设 Foreground —— 章节正文颜色由 renderChapterBlock 内部的
@@ -326,6 +311,16 @@ func renderStreamPanel(vp viewport.Model, width, height int, focused, running bo
 	return header + "\n" + vpStyle.Render(vp.View())
 }
 
+func runningEventCount(events []host.Event) int {
+	count := 0
+	for _, event := range events {
+		if event.Running() {
+			count++
+		}
+	}
+	return count
+}
+
 var streamCursorFrames = []string{"·", "✢", "✳", "✶", "✻", "✽"}
 
 func renderStreamCursor(frame int) string {
@@ -338,22 +333,45 @@ func renderStreamCursor(frame int) string {
 	return "\n" + lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(trail)
 }
 
-var streamActivityFrames = [][2]string{
-	{"✦", "✧"},
-	{"✦", "✧"},
-	{"✧", "✦"},
-	{"✧", "✦"},
-	{"✦", "✧"},
-	{"✦", "✧"},
-	{"✧", "✦"},
-	{"✧", "✦"},
+func renderStreamActivity(frame int) string {
+	return lipgloss.NewStyle().Foreground(colorAccent2).Bold(true).
+		Render(spinnerFrames[frame%len(spinnerFrames)] + " 生成中")
 }
 
-func renderStreamActivity(frame int) string {
-	pair := streamActivityFrames[frame%len(streamActivityFrames)]
-	major := lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(pair[0])
-	minor := lipgloss.NewStyle().Foreground(colorAccent2).Render(pair[1])
-	return major + " " + minor
+// renderActivityHeader 统一中栏标题：左侧竖标清楚指示键盘焦点，右侧常驻滚动状态。
+// active 用于让正在生成的实时输出即使未聚焦也保持可见层级。
+func renderActivityHeader(title, meta string, width int, focused, active bool) string {
+	markerColor := colorDim
+	titleColor := colorMuted
+	marker := "│"
+	if focused {
+		markerColor = colorAccent
+		titleColor = colorAccent
+		marker = "▌"
+	} else if active {
+		markerColor = colorAccent2
+		titleColor = colorAccent
+		marker = "▍"
+	}
+	left := lipgloss.NewStyle().Foreground(markerColor).Bold(true).Render(marker) + " " +
+		lipgloss.NewStyle().Foreground(titleColor).Bold(true).Render(title)
+	// 预留末尾一列呼吸位，避免右侧元信息紧贴下一栏的边界线。
+	metaMax := max(0, width-lipgloss.Width(left)-5)
+	meta = fitInlineLine(meta, metaMax)
+	right := lipgloss.NewStyle().Foreground(colorDim).Render(meta)
+	lineW := max(0, width-lipgloss.Width(left)-lipgloss.Width(right)-4)
+	line := lipgloss.NewStyle().Foreground(colorDim).Render(strings.Repeat("─", lineW))
+	if meta == "" {
+		return " " + left + " " + line
+	}
+	return " " + left + " " + line + " " + right
+}
+
+func followStateLabel(following bool) string {
+	if following {
+		return "跟随"
+	}
+	return "已停留"
 }
 
 // renderStreamContent 将流式输出按轮次渲染为语义分块。

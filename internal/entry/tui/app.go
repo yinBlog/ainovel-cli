@@ -9,6 +9,7 @@ import (
 	"github.com/voocel/ainovel-cli/assets"
 	"github.com/voocel/ainovel-cli/internal/bootstrap"
 	"github.com/voocel/ainovel-cli/internal/host"
+	"github.com/voocel/ainovel-cli/internal/library"
 	buildversion "github.com/voocel/ainovel-cli/internal/version"
 )
 
@@ -27,9 +28,21 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, build buildversion.Info) er
 		return err
 	}
 	defer rt.Close()
+	// 登记书架（~/.ainovel/books.json）：只记目录，书名进度在列出时现读。失败不影响创作。
+	registry := library.DefaultRegistry(bootstrap.DefaultConfigDir())
+	if err := registry.Record(rt.Dir()); err != nil {
+		slog.Warn("书架登记失败", "module", "tui", "dir", rt.Dir(), "err", err)
+	}
 
 	m := NewModel(rt, build.Version)
+	m.build = build // 会话内切书要用它重开新书的 Host
 	m.disableUpdateCheck = cfg.DisableUpdateCheck
+	// 欢迎页"最近的书"：启动时读一次书架，失败只记日志。
+	if books, err := registry.List(); err != nil {
+		slog.Warn("读取书架失败", "module", "tui", "err", err)
+	} else {
+		m.recentBooks = books
+	}
 	if logErr := rt.FileLogError(); logErr != nil {
 		logWarning := fmt.Errorf("文件日志不可用，已继续使用终端日志：%w", logErr)
 		m.err = logWarning

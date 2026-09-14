@@ -12,6 +12,7 @@ import (
 	"github.com/voocel/ainovel-cli/internal/domain"
 	"github.com/voocel/ainovel-cli/internal/entry/startup"
 	"github.com/voocel/ainovel-cli/internal/host"
+	"github.com/voocel/ainovel-cli/internal/library"
 	"github.com/voocel/ainovel-cli/internal/store"
 )
 
@@ -38,6 +39,10 @@ func Run(cfg bootstrap.Config, bundle assets.Bundle, opts Options) error {
 		return err
 	}
 	defer eng.Close()
+	// 登记书架（~/.ainovel/books.json），供 `ainovel-cli books` 列出；失败不影响创作。
+	if err := library.DefaultRegistry(bootstrap.DefaultConfigDir()).Record(eng.Dir()); err != nil {
+		fmt.Fprintf(stderr, "警告：书架登记失败：%v\n", err)
+	}
 	if logErr := eng.FileLogError(); logErr != nil {
 		fmt.Fprintf(stderr, "警告：文件日志不可用，继续使用终端日志：%v\n", logErr)
 	}

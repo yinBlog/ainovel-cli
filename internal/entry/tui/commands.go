@@ -70,7 +70,7 @@ func commandRegistryInstance() commandRegistry {
 			Name:        "model",
 			Group:       "system",
 			Usage:       "/model [role]",
-			Description: "切换角色的模型与推理强度",
+			Description: "切换角色的模型、推理强度与备用渠道",
 			AutoExecute: true,
 			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
 				roleHint := ""
@@ -90,14 +90,15 @@ func commandRegistryInstance() commandRegistry {
 			},
 		},
 		{
-			Name:        "config",
+			Name:        "channel",
+			Aliases:     []string{"config"},
 			Group:       "system",
-			Usage:       "/config",
-			Description: "新增或编辑 Provider、模型与上下文窗口",
+			Usage:       "/channel",
+			Description: "渠道：列表、新增/编辑定义、整体切换全部角色",
 			AutoExecute: true,
 			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
 				if len(args) != 0 {
-					m.applyEvent(host.Event{Time: time.Now(), Category: "ERROR", Summary: "用法：/config", Level: "error"})
+					m.applyEvent(host.Event{Time: time.Now(), Category: "ERROR", Summary: "用法：/channel", Level: "error"})
 					m.refreshEventViewport()
 					return m, nil
 				}
@@ -117,6 +118,117 @@ func commandRegistryInstance() commandRegistry {
 				m.report = newReportState(m.width, m.height, m.reportSeq, time.Now())
 				m.textarea.Blur()
 				return m, loadReport(m.runtime.Dir(), m.reportSeq)
+			},
+		},
+		{
+			Name:        "books",
+			Group:       "analysis",
+			Usage:       "/books",
+			Description: "查看本机开过的小说列表",
+			AutoExecute: true,
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				if len(args) != 0 {
+					return m.libraryError("用法：/books")
+				}
+				return m.openBooks()
+			},
+		},
+		{
+			Name:        "search",
+			Group:       "analysis",
+			Usage:       "/search <关键词>",
+			Description: "全书检索正文、大纲与摘要，Enter 跳到命中那一章",
+			AutoExecute: true,
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				query := strings.TrimSpace(strings.Join(args, " "))
+				if query == "" {
+					return m.libraryError("用法：/search <关键词>")
+				}
+				return m.openSearch(query)
+			},
+		},
+		{
+			Name:        "chapters",
+			Group:       "analysis",
+			Usage:       "/chapters",
+			Description: "查看本书章节明细（状态 / 字数 / 标题）",
+			AutoExecute: true,
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				if len(args) != 0 {
+					return m.libraryError("用法：/chapters")
+				}
+				return m.openChapters()
+			},
+		},
+		{
+			Name:        "read",
+			Group:       "analysis",
+			Usage:       "/read <章节号>",
+			Description: "查看某章正文（已完成取终稿，否则取草稿）",
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				return m.openChapter(args)
+			},
+		},
+		{
+			Name:        "reviews",
+			Group:       "analysis",
+			Usage:       "/reviews [章节号]",
+			Description: "查看 Editor 评审记录（评分 / 问题 / 返工范围）",
+			AutoExecute: true,
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				return m.openReviews(args)
+			},
+		},
+		{
+			Name:        "foreshadow",
+			Group:       "analysis",
+			Usage:       "/foreshadow",
+			Description: "查看伏笔台账（未回收 / 已回收及年龄）",
+			AutoExecute: true,
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				if len(args) != 0 {
+					return m.libraryError("用法：/foreshadow")
+				}
+				return m.openForeshadow()
+			},
+		},
+		{
+			Name:        "timeline",
+			Group:       "analysis",
+			Usage:       "/timeline",
+			Description: "查看故事内时间线（按章推进，标出时间没走动的地方）",
+			AutoExecute: true,
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				if len(args) != 0 {
+					return m.libraryError("用法：/timeline")
+				}
+				return m.openTimeline()
+			},
+		},
+		{
+			Name:        "violations",
+			Group:       "analysis",
+			Usage:       "/violations",
+			Description: "查看仍未处理的用户规则机械违规（按章）",
+			AutoExecute: true,
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				if len(args) != 0 {
+					return m.libraryError("用法：/violations")
+				}
+				return m.openViolations()
+			},
+		},
+		{
+			Name:        "characters",
+			Group:       "analysis",
+			Usage:       "/characters",
+			Description: "查看角色档案、出场统计、配角名册与人物关系",
+			AutoExecute: true,
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				if len(args) != 0 {
+					return m.libraryError("用法：/characters")
+				}
+				return m.openCharacters()
 			},
 		},
 		{
@@ -161,6 +273,16 @@ func commandRegistryInstance() commandRegistry {
 					return m, nil
 				}
 				return m, tea.Batch(fetchSnapshot(m.runtime), listenDone(m.runtime), m.textarea.Focus())
+			},
+		},
+		{
+			Name:        "newbook",
+			Group:       "writing",
+			Usage:       "/newbook <目录路径>",
+			Description: "在新目录开一本新书并切过去（当前这本存档保留）",
+			AutoExecute: true,
+			Run: func(m Model, args []string) (tea.Model, tea.Cmd) {
+				return m.startNewBook(strings.Join(args, " "))
 			},
 		},
 		{

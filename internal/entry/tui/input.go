@@ -89,8 +89,9 @@ func renderInputBox(inputView, hints string, snap host.UISnapshot, outputDir str
 	prompt := lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render("❯ ")
 	inputLine := prompt + inputView
 
-	// 提示行：快捷键独占整行——模型/花费等运行信息移入底部状态栏，不再挤在右侧互相截断。
-	line2 := fitInlineLine(hints, innerW)
+	// 提示行：快捷键独占一到两行——模型/花费等运行信息移入底部状态栏，
+	// 操作说明允许按分隔符折行，不把最后一组快捷键截成省略号。
+	line2 := renderShortcutHints(hints, innerW)
 
 	// 输入区（单一盒子，避免视觉上出现双输入框）
 	inputStyle := lipgloss.NewStyle().
@@ -110,6 +111,64 @@ func renderInputBox(inputView, hints string, snap host.UISnapshot, outputDir str
 	statusBlock := hintStyle.Render(renderStatusBar(snap, outputDir, innerW))
 
 	return inputBlock + "\n" + hintBlock + "\n" + statusBlock
+}
+
+// renderShortcutHints 把提示行里的按键染成低对比键帽，让用户可以先扫到操作、
+// 再阅读说明。inputHints 的特殊告警整行已有强调色，这里只处理普通提示。
+func renderShortcutHints(hints string, width int) string {
+	plain := ansi.Strip(hints)
+	if strings.HasPrefix(plain, "✂ ") || strings.HasPrefix(plain, "Press ") {
+		return fitInlineLine(hints, width)
+	}
+
+	dim := lipgloss.NewStyle().Foreground(colorDim)
+	key := lipgloss.NewStyle().Foreground(colorAccent).Background(colorKeyBg).Bold(true)
+	parts := strings.Split(plain, " · ")
+	for i, part := range parts {
+		name, rest, found := strings.Cut(part, " ")
+		if !found || !isShortcutKey(name) {
+			parts[i] = dim.Render(part)
+			continue
+		}
+		parts[i] = key.Render(name)
+		if rest != "" {
+			parts[i] += dim.Render(" " + rest)
+		}
+	}
+	separator := dim.Render(" · ")
+	var lines []string
+	line := ""
+	for _, part := range parts {
+		candidate := part
+		if line != "" {
+			candidate = line + separator + part
+		}
+		if line != "" && ansi.StringWidth(candidate) > width {
+			lines = append(lines, line)
+			line = part
+			continue
+		}
+		line = candidate
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	// 常规工作台提示最多占两行，避免窗口很矮时把正文挤没；按分隔符换行后，
+	// 绝大多数终端尺寸都能完整展示所有操作。
+	if len(lines) > 2 {
+		lines = lines[:2]
+		lines[1] = fitInlineLine(lines[1], width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func isShortcutKey(value string) bool {
+	switch value {
+	case "/", "Tab", "Tab/Shift+Tab", "Enter", "Esc", "End", "Ctrl+L", "Ctrl+R", "Ctrl+S", "Ctrl+P/N", "Ctrl+↑↓", "↑↓", "↑↓/PgUp":
+		return true
+	default:
+		return false
+	}
 }
 
 func joinInlineSides(left, right string, width int) string {

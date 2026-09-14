@@ -38,6 +38,7 @@ var (
 	colorReview  = lipgloss.AdaptiveColor{Light: "#b07530", Dark: "#e09b5a"}
 	colorContext = lipgloss.AdaptiveColor{Light: "#6b5a9e", Dark: "#a890d8"}
 	colorTool    = lipgloss.AdaptiveColor{Light: "#3a7a8a", Dark: "#7ec5d8"}
+	colorKeyBg   = lipgloss.AdaptiveColor{Light: "#eee7d8", Dark: "#34312b"}
 )
 
 // 状态标签颜色映射
@@ -91,11 +92,10 @@ var (
 			Foreground(colorText).
 			Padding(0, 1)
 
-	statusIconStyle = lipgloss.NewStyle().
-			Bold(true)
-
-	statusLabelStyle = lipgloss.NewStyle().
-				Foreground(colorText)
+	statusPillStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#1c1a14")).
+			Bold(true).
+			Padding(0, 1)
 
 	panelTitleStyle = lipgloss.NewStyle().
 			Foreground(colorAccent).
@@ -104,6 +104,11 @@ var (
 	fieldLabelStyle = lipgloss.NewStyle().
 			Foreground(colorMuted).
 			Width(10)
+
+	// compactLabelStyle 是侧栏紧凑键值行的两字标签列（4 列文字 + 1 列间距）。
+	compactLabelStyle = lipgloss.NewStyle().
+				Foreground(colorMuted).
+				Width(5)
 
 	// fieldValueStyle / cardContentStyle 用 bodyTextColor —— 概览区的值（运行态、
 	// 已完成章节数、字数等）、大纲条目、角色列表、章节摘要等"中性正文内容"

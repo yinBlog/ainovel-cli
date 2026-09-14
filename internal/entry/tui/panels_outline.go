@@ -12,14 +12,51 @@ import (
 // outlineGridThreshold 大纲切换多列的章节阈值。
 // short tier 上限 25 章，20 以下单列一屏装得下、且能保留"进行中"徽标；
 // 长篇 layered 模式滚动展开后 n 自然会突破 20，平滑切到多列。
-const outlineGridThreshold = 20
+const outlineGridThreshold = 12
+
+// outlineCollapseKeep 折叠已完成章节时保留在当前章之前的已完成章数（给回看上下文）。
+const outlineCollapseKeep = 2
 
 // renderOutlineSection 按章节数选布局：少则单列（含"进行中"徽标），多则多列网格。
+// 已完成章节超过一屏价值时折叠成一行"● 1–N 已完成"，让当前章与后续规划留在首屏。
 func renderOutlineSection(snap host.UISnapshot, contentW int) string {
-	if len(snap.Outline) < outlineGridThreshold {
-		return renderOutlineList(snap, contentW)
+	visible, note := collapseCompletedOutline(snap)
+	var b strings.Builder
+	if note != "" {
+		b.WriteString(lipgloss.NewStyle().Foreground(colorDim).Render(truncate(note, contentW)))
+		b.WriteString("\n")
 	}
-	return renderOutlineGrid(snap, contentW)
+	view := snap
+	view.Outline = visible
+	if len(view.Outline) < outlineGridThreshold {
+		b.WriteString(renderOutlineList(view, contentW))
+	} else {
+		b.WriteString(renderOutlineGrid(view, contentW))
+	}
+	return b.String()
+}
+
+// collapseCompletedOutline 把大纲里已完成的前缀折叠掉，只保留当前章前 outlineCollapseKeep 章。
+// 条件：大纲超过网格阈值且已完成章数超过保留数，否则原样返回。返回折叠说明（空表示未折叠）。
+func collapseCompletedOutline(snap host.UISnapshot) ([]host.OutlineSnapshot, string) {
+	if len(snap.Outline) < outlineGridThreshold || snap.CompletedCount <= outlineCollapseKeep+1 {
+		return snap.Outline, ""
+	}
+	cut := 0 // 折叠掉的章节数
+	for i, e := range snap.Outline {
+		if e.Chapter > snap.CompletedCount-outlineCollapseKeep {
+			break
+		}
+		if e.Chapter <= snap.CompletedCount {
+			cut = i + 1
+		}
+	}
+	if cut == 0 {
+		return snap.Outline, ""
+	}
+	first, last := snap.Outline[0].Chapter, snap.Outline[cut-1].Chapter
+	note := fmt.Sprintf("● %d–%d 已完成 · 折叠 %d 章", first, last, cut)
+	return snap.Outline[cut:], note
 }
 
 // renderOutlineList 单列章节列表（短篇用）。每行尾部带"进行中"徽标，垂直阅读节奏更接近目录。
@@ -153,106 +190,117 @@ func truncateWidth(s string, maxW int) string {
 }
 
 // renderDetailContent 构建右侧详情面板内容。
-// 优先展示基础设定（大纲、角色），然后是运行时信息（提交、审阅等）。
+// 顺序：当前章 → 大纲 → 角色 → 配角 → 简介 → 前提。
+// 紧凑版式：区块标题带标尺线，区块间只留一行空行，长文本按宽度折行不截断。
 func renderDetailContent(snap host.UISnapshot, contentW int) string {
 	var b strings.Builder
+	dim := lipgloss.NewStyle().Foreground(colorDim)
+	section := func(title string) {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(renderRuledHeader(title, contentW))
+		b.WriteString("\n")
+	}
+
+	// 当前章是用户最常需要确认的上下文：标题之外，把大纲里的核心事件也
+	// 固定展示出来，避免用户只能在实时输出中猜这一轮要写什么。
+	if current, ok := currentOutlineEntry(snap); ok {
+		section(fmt.Sprintf("当前章 · 第 %d 章", current.Chapter))
+		title := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+		currentTitle := current.Title
+		if currentTitle == "" {
+			currentTitle = "未命名章节"
+		}
+		writeWrapped(&b, currentTitle, contentW, title)
+		if current.CoreEvent != "" {
+			writeWrapped(&b, "核心事件："+current.CoreEvent, contentW, cardContentStyle)
+		}
+	} else if snap.InProgressChapter > 0 || (snap.CurrentChapter > 0 && snap.Phase == "writing") {
+		chapter := snap.InProgressChapter
+		if chapter <= 0 {
+			chapter = snap.CurrentChapter
+		}
+		section(fmt.Sprintf("当前章 · 第 %d 章", chapter))
+		writeWrapped(&b, "尚未生成章节大纲", contentW, dim.Italic(true))
+	}
 
 	// 大纲
 	if len(snap.Outline) > 0 {
-		outlineHeader := ":: 大纲"
+		header := "大纲"
 		if snap.Layered {
-			outlineHeader = fmt.Sprintf(":: 大纲（%s · 动态规划大纲）", snap.CurrentVolumeArc)
+			header = "大纲 " + snap.CurrentVolumeArc
 		}
-		b.WriteString(panelTitleStyle.Render(outlineHeader))
-		b.WriteString("\n")
+		section(header)
 		b.WriteString(renderOutlineSection(snap, contentW))
-		// 滚动规划提示
-		compassStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
 		if snap.Layered {
+			compass := dim.Italic(true)
 			if snap.NextVolumeTitle != "" {
-				b.WriteString(compassStyle.Render("  ┄ 下一卷：" + snap.NextVolumeTitle))
-				b.WriteString("\n")
+				writeWrapped(&b, "┄ 下一卷 "+snap.NextVolumeTitle, contentW, compass)
 			}
-			b.WriteString(compassStyle.Render("  ··· 后续章节随创作推进自动生成"))
-			b.WriteString("\n")
 			if snap.CompassDirection != "" {
-				direction := fmt.Sprintf("  → 终局：%s", snap.CompassDirection)
+				direction := "→ 终局 " + snap.CompassDirection
 				if snap.CompassScale != "" {
 					direction += "（" + snap.CompassScale + "）"
 				}
-				b.WriteString(compassStyle.Render(truncate(direction, contentW)))
-				b.WriteString("\n")
+				writeWrapped(&b, direction, contentW, compass)
 			}
 		}
-		b.WriteString("\n")
 	}
 
 	// 角色
 	if len(snap.Characters) > 0 {
-		b.WriteString(panelTitleStyle.Render(":: 角色"))
-		b.WriteString("\n")
+		section(fmt.Sprintf("角色 %d", len(snap.Characters)))
 		for _, c := range snap.Characters {
 			writeBulletWrapped(&b, c, contentW, cardContentStyle)
 		}
-		b.WriteString("\n")
 	}
 
-	// 配角生态：累计已出场的次要角色总数 + 最近活跃前 5 名
+	// 配角生态：总数进标题，最近活跃名单内联折行
 	if snap.SupportingCount > 0 {
-		b.WriteString(panelTitleStyle.Render(":: 配角生态"))
-		b.WriteString("\n")
-		b.WriteString(cardContentStyle.Render(truncate(fmt.Sprintf("已出场：%d 位", snap.SupportingCount), contentW)))
-		b.WriteString("\n")
-		for _, name := range snap.RecentSupporting {
-			writeBulletWrapped(&b, name, contentW, cardContentStyle)
+		section(fmt.Sprintf("配角 %d", snap.SupportingCount))
+		if len(snap.RecentSupporting) > 0 {
+			writeWrapped(&b, "近期 "+strings.Join(snap.RecentSupporting, " · "), contentW, cardContentStyle)
 		}
-		b.WriteString("\n")
 	}
 
 	if snap.Synopsis != "" {
-		b.WriteString(panelTitleStyle.Render(":: 简介"))
-		b.WriteString("\n")
-		for _, line := range wrapStreamText(snap.Synopsis, contentW) {
-			b.WriteString(lipgloss.NewStyle().Foreground(colorDim).Render(line))
-			b.WriteString("\n")
-		}
-		b.WriteString("\n\n")
+		section("简介")
+		writeWrapped(&b, snap.Synopsis, contentW, dim)
 	}
 
-	// 前提
 	if snap.Premise != "" {
-		b.WriteString(panelTitleStyle.Render(":: 前提"))
-		b.WriteString("\n")
-		for _, line := range wrapStreamText(snap.Premise, contentW) {
-			b.WriteString(lipgloss.NewStyle().Foreground(colorDim).Render(line))
-			b.WriteString("\n")
-		}
-		b.WriteString("\n\n")
+		section("前提")
+		writeWrapped(&b, snap.Premise, contentW, dim)
 	}
 
-	if snap.LastCommitSummary != "" {
-		b.WriteString(cardTitleStyle.Render("~ 最近提交 ~"))
-		b.WriteString("\n")
-		writeWrapped(&b, snap.LastCommitSummary, contentW, cardContentStyle)
-		b.WriteString("\n")
-	}
-
-	if snap.LastReviewSummary != "" {
-		b.WriteString(cardTitleStyle.Render("~ 最近审阅 ~"))
-		b.WriteString("\n")
-		writeWrapped(&b, snap.LastReviewSummary, contentW, cardContentStyle)
-		b.WriteString("\n")
-	}
-
-	if len(snap.RecentSummaries) > 0 {
-		b.WriteString(cardTitleStyle.Render("~ 摘要 ~"))
-		b.WriteString("\n")
-		for _, s := range snap.RecentSummaries {
-			writeWrapped(&b, s, contentW, cardContentStyle)
-		}
-	}
-
+	// 最近提交 / 最近审阅 / 章节摘要是运行时信息，随左栏状态一起展示（renderStateContent），
+	// 右栏只放大纲、角色、简介、前提这些相对稳定的设定事实。
 	return b.String()
+}
+
+func currentOutlineEntry(snap host.UISnapshot) (host.OutlineSnapshot, bool) {
+	chapter := snap.InProgressChapter
+	if chapter <= 0 {
+		chapter = snap.CurrentChapter
+	}
+	if chapter <= 0 {
+		return host.OutlineSnapshot{}, false
+	}
+	for _, entry := range snap.Outline {
+		if entry.Chapter == chapter {
+			return entry, true
+		}
+	}
+	return host.OutlineSnapshot{}, false
+}
+
+// renderRuledHeader 渲染"标题 ────"式区块头：标题强调色，其后用细线填满剩余宽度。
+// 左右两栏共用，替代旧的 ":: 标题" 与带竖线的卡片。
+func renderRuledHeader(title string, width int) string {
+	lineW := max(0, width-lipgloss.Width(title)-1)
+	return panelTitleStyle.Render(title) + " " +
+		lipgloss.NewStyle().Foreground(colorDim).Render(strings.Repeat("─", lineW))
 }
 
 // writeWrapped 按视觉宽度折行写入一段文本，每行独立渲染样式。

@@ -78,12 +78,47 @@ type modelConfigState struct {
 	modelColumn  int      // 0=模型 ID，1=上下文窗口
 	editModelIdx int
 	addingModel  bool
+
+	// 渠道列表这一步同时承担“整体切换”：plan 是切到光标所在渠道后各角色槽位的去向，
+	// 光标一动就重算。预演失败（渠道没模型、缺 Key）在按 Enter 之前就摆出来。
+	plan    []bootstrap.ChannelSlotPlan
+	planErr string
 }
 
 func newModelConfigState(rt *host.Host) *modelConfigState {
 	state := &modelConfigState{snapshot: rt.ModelConfiguration(), editModelIdx: -1}
 	state.buildProviderMenus()
+	state.focusDefaultChannel()
+	// 这里必须按具体指针判空：把 nil *host.Host 装进 channelSwitcher 接口后
+	// 接口本身不为 nil，refreshChannelPlan 里的判空拦不住，会直接空指针。
+	if rt != nil {
+		state.refreshChannelPlan(rt)
+	}
 	return state
+}
+
+// currentChannel 返回一级菜单光标所在的渠道；停在“新增”行时返回 nil。
+func (s *modelConfigState) currentChannel() *host.ProviderSnapshot {
+	if s.step != configStepProvider || s.cursor < 0 || s.cursor >= len(s.providerChoices) {
+		return nil
+	}
+	return s.providerChoices[s.cursor].existing
+}
+
+// refreshChannelPlan 预演整体切到光标所在渠道的结果。渠道没模型、未配置时这里就会
+// 失败，用户在按 Enter 之前就能看到原因。
+func (s *modelConfigState) refreshChannelPlan(rt channelSwitcher) {
+	s.plan, s.planErr = nil, ""
+	channel := s.currentChannel()
+	if channel == nil || rt == nil {
+		return
+	}
+	plan, err := rt.PlanChannelSwitch(channel.Name)
+	if err != nil {
+		s.planErr = err.Error()
+		return
+	}
+	s.plan = plan
 }
 
 // buildProviderMenus 拆成两级：一级菜单只列已配置的 Provider（编辑）+ 一个统一的
@@ -100,7 +135,7 @@ func (s *modelConfigState) buildProviderMenus() {
 		})
 	}
 	s.providerChoices = append(s.providerChoices, configProviderChoice{
-		label: "+ 新增 Provider…", add: true,
+		label: "+ 新增渠道…", add: true,
 	})
 
 	for _, presetValue := range bootstrap.ProviderPresets() {
@@ -579,6 +614,12 @@ func (m Model) handleModelConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			state.step = target
 			state.cursor = 0
 			state.message = ""
+			if target == configStepProvider {
+				// 回到渠道列表：光标落回刚才那个渠道，并按它重算去向表——
+				// 否则列表高亮的是第一行、预览还停在上一个渠道，两边对不上。
+				state.focusChannel(state.provider)
+				state.refreshChannelPlan(m.runtime)
+			}
 			return m, nil
 		}
 		m.modelConfig = nil
@@ -590,16 +631,9 @@ func (m Model) handleModelConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch state.step {
 	case configStepProvider:
-		moveConfigCursor(state, msg, len(state.providerChoices))
-		if msg.Type == tea.KeyEnter && state.cursor >= 0 && state.cursor < len(state.providerChoices) {
-			choice := state.providerChoices[state.cursor]
-			if choice.add {
-				state.step = configStepAddPicker
-				state.cursor = 0
-				state.message = ""
-			} else {
-				state.applyProviderChoice(choice)
-			}
+		if state.handleChannelKey(msg, m.runtime) {
+			m.modelConfig = nil
+			return m, tea.Batch(m.textarea.Focus(), fetchSnapshot(m.runtime))
 		}
 	case configStepAddPicker:
 		moveConfigCursor(state, msg, len(state.presetChoices))
@@ -797,13 +831,22 @@ func renderModelConfigModal(width int, state *modelConfigState) string {
 	boxW := min(max(60, width*3/5), 76, width-4)
 	contentW := paddedModalContentWidth(boxW)
 	var lines []string
-	title := "/config 配置模型"
+	title := "/channel 渠道"
 	hint := "↑↓ 选择 · Enter 确认 · Esc 取消"
 
 	switch state.step {
 	case configStepProvider:
-		lines = append(lines, configHeading("选择要编辑的 Provider，或新增一个"))
-		lines = append(lines, renderConfigChoices(labelsForProviderChoices(state.providerChoices), state.cursor, contentW, 12)...)
+		lines = append(lines, configHeading("渠道列表"))
+		lines = append(lines, renderChannelChoices(state, contentW, 10)...)
+		if plan := renderChannelPlan(state, contentW); len(plan) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, plan...)
+		}
+		if state.currentChannel() == nil {
+			hint = "↑↓ 选择 · Enter 新增渠道 · Esc 关闭"
+		} else {
+			hint = "↑↓ 选渠道 · Enter 整体切换 · E 编辑定义 · Esc 关闭"
+		}
 	case configStepAddPicker:
 		lines = append(lines, configHeading("选择要新增的 Provider"))
 		lines = append(lines, renderConfigChoices(labelsForProviderChoices(state.presetChoices), state.cursor, contentW, 12)...)
