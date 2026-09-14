@@ -1,6 +1,7 @@
 package library
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/voocel/ainovel-cli/internal/domain"
@@ -59,22 +60,48 @@ func Timeline(dir string) (*BookInfo, []TimelineRow, error) {
 // ViolationRow 是违规台账的一行：某章当前仍存在的机械违规。
 type ViolationRow struct {
 	Chapter    int
-	At         string
 	Violations []rules.Violation
 }
 
 // Violations 返回全书仍有机械违规的章节，按章号升序。
-// 返工后被清空的章不出现——它已经没有问题了。
+//
+// 违规是**派生事实**，不是存下来的账：对每章的接纳正文现跑一遍机械检查，
+// 判定与 novel_context 的 buildRuleViolations 同口径（Lint + Check），
+// 只读视图和创作侧不会看到两套结论。
+//
+// 这样返工修好的章会自动从台账消失，不依赖有没有补写一条"已清空"的记录；
+// 代价是看不到历史——只回答"现在哪些章还留着问题"。
 func Violations(dir string) (*BookInfo, []ViolationRow, error) {
 	s := store.NewStore(dir)
 	info, err := inspect(s)
 	if err != nil {
 		return nil, nil, err
 	}
-	records := s.World.LoadAllRuleViolations()
-	rows := make([]ViolationRow, 0, len(records))
-	for _, rec := range records {
-		rows = append(rows, ViolationRow{Chapter: rec.Chapter, At: rec.At, Violations: rec.Violations})
+	progress, err := s.Progress.Load()
+	if err != nil {
+		return info, nil, fmt.Errorf("读取进度失败：%w", err)
+	}
+	// 没有用户规则快照时只跑 Lint（markdown 残留、非中文片段这类与规则无关的检查）。
+	var structured rules.Structured
+	if snap, err := s.UserRules.Load(); err == nil && snap != nil {
+		structured = snap.Structured
+	}
+
+	chapters := append([]int(nil), progress.CompletedChapters...)
+	sort.Ints(chapters)
+	rows := make([]ViolationRow, 0, len(chapters))
+	for _, ch := range chapters {
+		// 逐章读、缺记录就跳过：老项目或半迁移的书可能有已完成章却没有接纳记录，
+		// 只读视图不该因此整个打不开（与 novel_context 的 record == nil 早返回同口径）。
+		rec, err := s.ChapterRecords.Load(ch)
+		if err != nil || rec == nil {
+			continue
+		}
+		violations := append(rules.Lint(rec.Content), rules.Check(rec.Content, structured)...)
+		if len(violations) == 0 {
+			continue
+		}
+		rows = append(rows, ViolationRow{Chapter: ch, Violations: violations})
 	}
 	return info, rows, nil
 }

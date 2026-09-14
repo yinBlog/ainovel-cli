@@ -30,7 +30,7 @@ go run ./cmd/ainovel-cli eval --cases evals/cases/smoke             # offline ev
 go run ./cmd/ainovel-cli eval --cases evals/cases/smoke --variant ./my-prompts --repeat 2   # A/B prompt variant
 ```
 
-**Local builds need `go.work` with a sibling `../agentcore` checkout** (gitignored, so create it if missing: `use (. ../agentcore)`; clone `https://github.com/voocel/agentcore` next to this repo). `internal/agents/ctxpack` uses `corecontext.FindCutPoint`, which only exists on agentcore main, not in the v1.8.2 release pinned by `go.mod`. CI sets `GOWORK=off` and therefore fails on this snapshot until agentcore tags a release and `go.mod` is bumped (run the `TestContract_*` tests before bumping). Do not set `GOWORK=off` locally.
+**`go.work` is no longer required.** `internal/agents/ctxpack` uses `corecontext.FindCutPoint`, which used to exist only on agentcore main — the v1.8.2 release pinned by `go.mod` lacked it, so a sibling `../agentcore` checkout plus `go.work` was mandatory and CI (`GOWORK=off`) failed. Upstream `47df100` bumped `go.mod` to agentcore v1.8.3, which ships `FindCutPoint`: `GOWORK=off go build ./... && go vet ./... && go test ./...` is green. A local `go.work` still works if you have one (it is gitignored), but it is now only for developing against agentcore main — run the `TestContract_*` tests before bumping the pin.
 
 Runtime artifacts land in `./output/novel/` (gitignored as `output*`). One book per working directory; running again in the same directory resumes from checkpoints.
 

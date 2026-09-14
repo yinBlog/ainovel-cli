@@ -644,7 +644,7 @@ func runViolations(dir string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	for _, row := range rows {
-		fmt.Fprintf(stdout, "第 %d 章  %s\n", row.Chapter, row.At)
+		fmt.Fprintf(stdout, "第 %d 章  %d 条\n", row.Chapter, len(row.Violations))
 		for _, v := range row.Violations {
 			fmt.Fprintf(stdout, "  %s %s %s", padRight(string(v.Severity), 8), padRight(v.Rule, 18), v.Target)
 			if v.Actual != nil {

@@ -185,10 +185,6 @@ func Characters(dir string) (*BookInfo, *CharacterReport, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("读取角色档案失败：%w", err)
 	}
-	cast, err := s.Cast.Load()
-	if err != nil {
-		return nil, nil, fmt.Errorf("读取配角名册失败：%w", err)
-	}
 	relations, err := s.World.LoadRelationships()
 	if err != nil {
 		return nil, nil, fmt.Errorf("读取人物关系失败：%w", err)
@@ -196,6 +192,15 @@ func Characters(dir string) (*BookInfo, *CharacterReport, error) {
 	progress, err := s.Progress.Load()
 	if err != nil {
 		return nil, nil, fmt.Errorf("读取进度失败：%w", err)
+	}
+	// 配角名册不再持久化，改由接纳记录派生（上游 c7cfdf5「派生状态投影」）。
+	// 这里跟 Host 走同一条路径，避免只读视图和创作侧看到两套名册。
+	var cast []domain.CastEntry
+	if progress != nil {
+		cast, err = s.BuildCast(progress.CompletedChapters)
+		if err != nil {
+			return nil, nil, fmt.Errorf("重建配角名册失败：%w", err)
+		}
 	}
 
 	// 摘要里的出场名单 → 每个名字的出场章号集合。

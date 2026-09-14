@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/voocel/ainovel-cli/internal/domain"
-	"github.com/voocel/ainovel-cli/internal/rules"
 	"github.com/voocel/ainovel-cli/internal/store"
 )
 
@@ -55,35 +54,47 @@ func TestTimelineIsEmptyForFreshBook(t *testing.T) {
 	}
 }
 
-// 违规台账只列"当前仍存在的"：同章追加式写入以最后一条为准，返工后清空的章要消失。
-func TestViolationsKeepsLatestPerChapterAndDropsCleared(t *testing.T) {
+// 违规是派生的：对每章接纳正文现跑一遍机械检查，干净的章不出现在台账里。
+// 返工修好之后不需要补写"已清空"，重跑一遍自然就没了。
+func TestViolationsDerivesFromChapterContent(t *testing.T) {
 	_, bookDir := newBook(t)
 	s := store.NewStore(bookDir)
-	write := func(chapter int, vs ...rules.Violation) {
+	accept := func(chapter int, content string) {
 		t.Helper()
-		if err := s.World.SaveRuleViolations(chapter, vs); err != nil {
-			t.Fatalf("save violations ch%d: %v", chapter, err)
+		if _, err := s.ChapterRecords.Accept(chapter, domain.ChapterOriginGenerated, content,
+			domain.ChapterFacts{}, domain.StyleDelta{}); err != nil {
+			t.Fatalf("accept ch%d: %v", chapter, err)
 		}
 	}
-	write(2, rules.Violation{Rule: "forbidden_phrases", Target: "不禁", Severity: rules.SeverityWarning})
-	write(1, rules.Violation{Rule: "fatigue_words", Target: "忽然", Severity: rules.SeverityWarning})
-	// 第 1 章返工后重写，只剩一条别的问题——以最后一条为准。
-	write(1, rules.Violation{Rule: "forbidden_chars", Target: "囧", Severity: rules.SeverityError})
-	// 第 2 章返工后清干净了，不该再占版面。
-	write(2)
+	// 第 1 章留着 markdown 残留，第 2 章是干净的正文。
+	accept(1, "他说：**这把剑**不能碰。\n\n然后转身离开。")
+	accept(2, "他收剑入鞘，转身离开。")
 
 	_, rows, err := Violations(bookDir)
 	if err != nil {
 		t.Fatalf("violations: %v", err)
 	}
 	if len(rows) != 1 || rows[0].Chapter != 1 {
-		t.Fatalf("清空的章应消失、只剩第 1 章：%+v", rows)
+		t.Fatalf("只有第 1 章该上台账：%+v", rows)
 	}
-	if len(rows[0].Violations) != 1 || rows[0].Violations[0].Target != "囧" {
-		t.Fatalf("同章应以最后一条为准：%+v", rows[0].Violations)
+	found := false
+	for _, v := range rows[0].Violations {
+		if v.Rule == "markdown_residue" {
+			found = true
+		}
 	}
-	if rows[0].At == "" {
-		t.Fatal("应带上记录时间")
+	if !found {
+		t.Fatalf("应检出 markdown 残留：%+v", rows[0].Violations)
+	}
+
+	// 把第 1 章改干净——不补任何"已清空"记录，它就该从台账消失。
+	accept(1, "他说，这把剑不能碰。")
+	_, rows, err = Violations(bookDir)
+	if err != nil {
+		t.Fatalf("violations: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("改干净后台账应为空：%+v", rows)
 	}
 }
 

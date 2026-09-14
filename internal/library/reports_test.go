@@ -43,12 +43,17 @@ func seedReports(t *testing.T, bookDir string) {
 	if err := s.Summaries.SaveSummary(domain.ChapterSummary{Chapter: 1, Title: "雨夜归人", Characters: []string{"阿禾"}}); err != nil {
 		t.Fatalf("save summary 1: %v", err)
 	}
-	if err := s.Cast.Save([]domain.CastEntry{
-		{Name: "更夫", FirstSeenChapter: 1, LastSeenChapter: 1, AppearanceCount: 1, AppearanceChapters: []int{1}},
-		{Name: "赵捕头", BriefRole: "县衙捕头", FirstSeenChapter: 2, LastSeenChapter: 2, AppearanceCount: 1, AppearanceChapters: []int{2}},
-	}); err != nil {
-		t.Fatalf("save cast: %v", err)
+	// 配角名册不再持久化，由接纳记录派生（上游 c7cfdf5）：种子数据改成落章节记录，
+	// 让 ProjectCast 自己算出更夫和赵捕头。
+	acceptCast := func(chapter int, names []string, intros []domain.CastIntro) {
+		t.Helper()
+		if _, err := s.ChapterRecords.Accept(chapter, domain.ChapterOriginGenerated, "正文",
+			domain.ChapterFacts{Characters: names, CastIntros: intros}, domain.StyleDelta{}); err != nil {
+			t.Fatalf("accept ch%d: %v", chapter, err)
+		}
 	}
+	acceptCast(1, []string{"阿禾", "更夫"}, nil)
+	acceptCast(2, []string{"阿禾", "赵捕头"}, []domain.CastIntro{{Name: "赵捕头", BriefRole: "县衙捕头"}})
 	if err := s.World.SaveRelationships([]domain.RelationshipEntry{{CharacterA: "阿禾", CharacterB: "李掌柜", Relation: "雇佣", Chapter: 1}}); err != nil {
 		t.Fatalf("save relationships: %v", err)
 	}

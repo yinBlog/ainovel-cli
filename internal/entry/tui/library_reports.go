@@ -458,7 +458,7 @@ func renderViolationsText(info *library.BookInfo, rows []library.ViolationRow, w
 	b.WriteString(titleStyle.Render(bookHeading(info)))
 	b.WriteString(mutedStyle.Render(fmt.Sprintf("  %d 章 · %d 条", len(rows), total)))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("只列当前仍存在的：返工后清掉的章不再出现。规则来自 ~/.ainovel/rules 与 ./.ainovel/rules。"))
+	b.WriteString(dimStyle.Render("对每章正文现跑一遍机械检查，返工修好即自动消失。规则来自 ~/.ainovel/rules 与 ./.ainovel/rules。"))
 	b.WriteString("\n\n")
 	if len(rows) == 0 {
 		b.WriteString(mutedStyle.Render("没有未处理的机械违规。"))
@@ -467,10 +467,7 @@ func renderViolationsText(info *library.BookInfo, rows []library.ViolationRow, w
 	}
 
 	for _, row := range rows {
-		b.WriteString(dimStyle.Render(fmt.Sprintf("第 %d 章", row.Chapter)))
-		if row.At != "" {
-			b.WriteString(dimStyle.Render(" · " + row.At))
-		}
+		b.WriteString(dimStyle.Render(fmt.Sprintf("第 %d 章 · %d 条", row.Chapter, len(row.Violations))))
 		b.WriteString("\n")
 		for _, v := range row.Violations {
 			style := warnStyle

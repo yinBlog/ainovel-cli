@@ -55,7 +55,7 @@ UI、诊断、事件日志都是从事件流 / 只读工件投影出来的被动
 - **Checkpoint** — step 级推进记录（plan / draft / commit / review / arc_summary）
 - **Artifact** — 章节正文、大纲、角色、摘要等产物
 
-不引入 WorkflowInstance / TaskInstance / Command 等抽象。附属事实（大纲反馈池、机械违规记录、裁定审计）同样是扁平 jsonl，各有唯一生产者与消费者。
+不引入 WorkflowInstance / TaskInstance / Command 等抽象。需要持久化的附属事实（大纲反馈池、裁定审计）同样是扁平 jsonl，各有唯一生产者与消费者；可由章节记录重建的视图不重复落盘。
 
 ### 2.5 四铁律
 
@@ -165,7 +165,7 @@ Artifact 在 `store/outline.go` `drafts.go` `summaries.go` `characters.go` `worl
 - **Decisions**（`meta/decisions.jsonl`）：每次 Arbiter 裁定的审计记录（facts+input+decision），可离线重放；**不是恢复数据源**（恢复只依赖 Progress/Checkpoint/RunMeta）。
 - **增长型世界事实**：时间线与角色状态变化分别以 `timeline.jsonl`、`meta/state_changes.jsonl` 追加；进程内维护去重索引，正常提交只写本章增量。旧版 JSON 数组在下一次追加时按“先原子写新日志、后删除旧文件”的幂等协议迁移，`timeline.md` 是可重建的人类可读投影。
 - **大纲反馈池**（`meta/outline_feedback.jsonl`）：writer 的普通反馈在下一次结构操作中消费；外部正文修订若影响剧情，则在继续写作前优先交给 architect，处理后清空。
-- **机械违规记录**（`meta/rule_violations.jsonl`）：commit 时按 user_rules 检查的结果，editor 评审经 `novel_context(chapter=N)` 消费；best-effort 质量元数据，非与提交同级强一致。
+- **机械违规视图**：`novel_context(chapter=N)` 按章节接纳正文与当前 `user_rules` 即时计算，供 editor 消费；不维护可能与正文或规则失同步的独立工件。
 
 ### 4.4 分层大纲与完本收敛（收官卷）
 
@@ -186,11 +186,11 @@ Artifact 在 `store/outline.go` `drafts.go` `summaries.go` `characters.go` `worl
 
 ### 5.1 读类工具
 
-`novel_context(scope)` / `read_chapter(n)` —— 任何时候可调用，不依赖前置状态，返回数据足够 LLM 独立决策。`novel_context(chapter=N)` 额外注入该章机械违规（如有）；architect 路径注入已完成卷/当前卷弧摘要、角色快照、大纲反馈池与 foundation 状态。长篇规划概览只携带当前弧章节，其余卷弧保留结构骨架；需要检查某个已展开弧时用 `novel_context(volume=V, arc=A)` 精确读取。扩弧时，已发生内容是事实，骨架只是计划；Architect 可在 `expand_arc` 中同步修订目标弧的 title/goal 并展开章节。
+`novel_context(scope)` / `read_chapter(n)` —— 任何时候可调用，不依赖前置状态，返回数据足够 LLM 独立决策。`novel_context(chapter=N)` 额外注入该章机械违规（如有）；architect 路径注入已完成卷/当前卷弧摘要、角色快照、大纲反馈池与 foundation 状态。长篇规划概览只携带当前弧章节，其余卷弧保留结构骨架；用 `novel_context(volume=V, arc=A)` 精确读取时，已展开弧返回章节详情，未展开弧返回骨架目标。扩弧时，已发生内容是事实，骨架只是计划；Architect 用 `expand_next_arc` 同步修订下一骨架弧的 title/goal 并展开章节，目标位置由系统确定。
 
 ### 5.2 写类工具（单文件原子 + 分级恢复语义）
 
-单文件写入原子；跨文件步骤不承诺数据库式原子性。`commit_chapter` 的普通提交与返工提交共用 `PendingCommit`，按“完整意图 → artifact/状态 → Progress → checkpoint → 清除意图”推进；恢复只使用首次落盘的规范化 payload 与正文快照，禁止采用重启后模型重新生成的参数或被覆盖的 draft。`expand_arc` / `append_volume` 等结构操作没有持久化意图，只承诺同一参数的幂等重放、派生视图修复和错误显式返回。
+单文件写入原子；跨文件步骤不承诺数据库式原子性。`commit_chapter` 的普通提交与返工提交共用 `PendingCommit`，按“完整意图 → artifact/状态 → Progress → checkpoint → 清除意图”推进；恢复只使用首次落盘的规范化 payload 与正文快照，禁止采用重启后模型重新生成的参数或被覆盖的 draft。`expand_next_arc` / `append_volume` 等结构操作没有持久化意图，只承诺同一参数的幂等重放、派生视图修复和错误显式返回。
 
 | 工具 | Artifact | Step |
 |---|---|---|
@@ -203,7 +203,8 @@ Artifact 在 `store/outline.go` `drafts.go` `summaries.go` `characters.go` `worl
 | `save_review` | reviews/chXX.json（global 为 chXX-global.json） | review |
 | `save_arc_summary` | summaries/arc-vNNaNN.json | arc_summary |
 | `save_volume_summary` | summaries/vol-vNN.json | volume_summary |
-| `save_foundation` | foundation/*.json（expand_arc/append_volume/update_compass 成功即消费反馈池） | premise / outline / layered_outline / characters / world_rules / expand_arc / append_volume / update_compass / complete_book |
+| `save_foundation` | foundation/*.json（append_volume/update_compass 成功即消费反馈池） | premise / outline / layered_outline / characters / world_rules / append_volume / update_compass / complete_book |
+| `expand_next_arc` | layered_outline.json（成功即消费反馈池） | 系统定位下一骨架弧；模型仅提交 title / goal / chapters |
 
 `commit_chapter` 承担弧/卷/全书完成检测，返回结构化事实；`save_review` 不做文学阈值裁定，只校验审阅事实并把 Editor 给出的 verdict 原子映射为 Flow 与返工队列。
 
@@ -237,7 +238,7 @@ Artifact 在 `store/outline.go` `drafts.go` `summaries.go` `characters.go` `worl
 
 `agents.BuildWorkers`（`internal/agents/build.go`）把三类 Worker 装配为一个 `subagent.Runner`：Engine 直接调用 `Run(agent, task)`，每次调用是一个完整的 `agentcore.AgentLoop`（独立 context、独立模型、独立重试）。全部装配一次生效：角色模型 + failover、prompt cache key（每 spawn 自增 #seq）、ThinkingLevel、UsageRecorder/SessionLogger（OnMessage）、Writer ContextManagerFactory（窗口随 /model 切换自动重建）、RestorePack、StopGuardFactory、StopAfterTools。
 
-Worker 进度中继走 **ctx 的 ToolProgress 回调**：Engine 以 `agentcore.WithToolProgress(ctx, relay)` 调 `Runner.Run`，子代理的工具调用/流式正文/thinking/retry/context 事件经 relay 进入 observer——与 Coordinator 时代同一 ProgressPayload 形态，观察层复用。
+Worker 进度由两类事实投影：`AgentLoop` 原始事件界定模型响应生命周期，`ToolProgress` 中继工具执行、流式正文、thinking、retry 与 context。模型生成工具参数归于 MODEL，只有真正进入 `ToolExecStart` 后才计入 TOOL。
 
 ```
 Engine ── Runner.Run(agent, task) ──▶ architect_short/long · writer · editor

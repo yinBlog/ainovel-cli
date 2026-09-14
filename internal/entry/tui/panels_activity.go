@@ -26,7 +26,7 @@ func renderEventContent(events []host.Event, width, spinnerFrame int) string {
 }
 
 // 进行中的调用类事件使用的 spinner 帧（bubbles.Spinner.Dot，独立于顶栏 MiniDot）。
-var eventRunningFrames = toolSpinnerFrames
+var eventRunningFrames = eventSpinnerFrames
 
 func runningSpinner(frame int) string {
 	return eventRunningFrames[frame%len(eventRunningFrames)]
@@ -104,6 +104,21 @@ func renderEventLine(ev host.Event, width, spinnerFrame int) string {
 			line += durStr
 		}
 		return line
+
+	case ev.Category == "MODEL":
+		var icon, sum string
+		if running {
+			icon = lipgloss.NewStyle().Foreground(colorContext).Bold(true).Render(runningSpinner(spinnerFrame))
+			sum = lipgloss.NewStyle().Foreground(colorContext).Bold(true).Render(truncate(ev.Summary, maxSumW))
+			durStr = renderEventDuration(time.Since(ev.Time))
+		} else if ev.Failed {
+			icon = lipgloss.NewStyle().Foreground(colorError).Render("✕")
+			sum = lipgloss.NewStyle().Foreground(colorError).Render(truncate(ev.Summary, maxSumW))
+		} else {
+			icon = lipgloss.NewStyle().Foreground(colorDim).Render("├")
+			sum = lipgloss.NewStyle().Foreground(colorContext).Render(truncate(ev.Summary, maxSumW))
+		}
+		return tsStr + " " + indent + icon + " " + sum + durStr
 
 	case ev.Category == "ERROR":
 		icon := lipgloss.NewStyle().Foreground(colorError).Bold(true).Render("✕")
@@ -576,4 +591,13 @@ func wrapRunes(text string, width int) []string {
 		return []string{""}
 	}
 	return lines
+}
+
+// renderEventActivity 在引擎运行时给事件流末尾追加一行动画，表示"还在跑"。
+// 合并上游 fc17855 时带入：本地重写过本文件的相邻区域，自动合并把它挤掉了。
+func renderEventActivity(snap host.UISnapshot, frame, width int) string {
+	if !snap.IsRunning {
+		return ""
+	}
+	return renderEventSparkle(frame, width)
 }
